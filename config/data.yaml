@@ -1,0 +1,21 @@
+path: # Path to the dataset (абсолютный путь)
+# Поскольку датасет содержит в себе RGB и NIR каналы, мы будем использовать только RGB для обучения модели.
+# То есть надо необходимо указать абсолютный путь к папке с RGB изображениями.
+# Иначе указать абслютный путь к папке с NIR изображениями, если необходимо использовать их.
+
+train: images/train
+val: images/val
+test: images/test
+
+nc: 9
+
+names:
+  0: double_plant
+  1: drydown
+  2: endrow
+  3: nutrient_deficiency
+  4: planter_skip
+  5: storm_damage
+  6: water
+  7: waterway
+  8: weed_cluster
