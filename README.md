@@ -21,9 +21,6 @@
 | Классификация | Определение культуры по полигону |
 | Журнал | Лог операций |
 
-## Mock-режим
-
-Если backend не запущен, включите «Использовать заглушки» — UI работает с тестовыми данными (как в `web/backend/routers/classification_router.py`).
 
 ## Структура
 
@@ -36,7 +33,3 @@ agriculture_vision/
 ├── layer_utils.py                   # растр ↔ карта QGIS
 └── constants.py                     # классы, пороги
 ```
-
-## ТЗ
-
-Файл `web/4.docx` в репозитории не найден. Реализация следует `web/docs/API_DOCUMENTATION.md` и роутерам в `web/backend/`.
