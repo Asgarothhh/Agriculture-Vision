@@ -1,0 +1,67 @@
+services:
+  # 1) Веса моделей → shared volume /models
+  models:
+    build: ./models
+    container_name: av-models
+    volumes:
+      - model-data:/models
+    restart: unless-stopped
+
+  # 2) PostgreSQL — пользователи веб-UI
+  db:
+    image: postgres:16-alpine
+    container_name: av-db
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-agriculture_vision}
+      POSTGRES_USER: ${POSTGRES_USER:-av}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-av_demo_change_me}
+    volumes:
+      - db-data:/var/lib/postgresql/data
+      - ./db/init.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
+    ports:
+      - "${DB_PORT:-5432}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+
+  # 3) ML FastAPI backend
+  backend:
+    build: ./backend
+    container_name: av-backend
+    environment:
+      MODELS_DIR: /models
+      PLUGIN_DIR: /app/plugin
+    volumes:
+      - model-data:/models:ro
+    ports:
+      - "${BACKEND_PORT:-8000}:8000"
+    depends_on:
+      models:
+        condition: service_started
+    restart: unless-stopped
+
+  # 4) Веб-интерфейс (Express + прокси на backend)
+  frontend:
+    build: ./frontend
+    container_name: av-frontend
+    environment:
+      PORT: 5173
+      NODE_ENV: production
+      ML_BACKEND_URL: http://backend:8000
+      DATABASE_URL: postgres://${POSTGRES_USER:-av}:${POSTGRES_PASSWORD:-av_demo_change_me}@db:5432/${POSTGRES_DB:-agriculture_vision}
+      JWT_SECRET: ${JWT_SECRET:-change-me-in-production}
+    ports:
+      - "${FRONTEND_PORT:-5173}:5173"
+    depends_on:
+      db:
+        condition: service_healthy
+      backend:
+        condition: service_started
+    restart: unless-stopped
+
+volumes:
+  model-data:
+  db-data:

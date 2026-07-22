@@ -1,0 +1,9 @@
+# Docker / IDE
+.env
+**/.venv/
+**/node_modules/
+**/__pycache__/
+*.pyc
+.DS_Store
+
+# Не коммитить локальные переопределения весов вне models/weights

@@ -1,0 +1,20 @@
+Agriculture Vision — Docker (заказчику)
+
+Архив: agriculture-vision-docker.tar.gz (~730 MB, веса внутри)
+
+4 контейнера:
+  1) frontend  — веб UI :5173
+  2) backend   — ML API  :8000
+  3) db        — Postgres :5432
+  4) models    — веса YOLO + SegFormer
+
+Запуск:
+  tar -xzf agriculture-vision-docker.tar.gz
+  cd agriculture-vision-docker
+  cp .env.example .env
+  docker compose up -d --build
+  открыть http://localhost:5173
+
+Подробности: README.md внутри папки.
+
+QGIS-плагин в этот архив не входит.
