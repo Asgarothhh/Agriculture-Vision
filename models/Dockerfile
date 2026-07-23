@@ -7,7 +7,8 @@ RUN apk add --no-cache bash coreutils
 
 COPY weights/ /seed/
 COPY entrypoint.sh /entrypoint.sh
-RUN chmod +x /entrypoint.sh
+# Windows CRLF → LF (иначе: exec /entrypoint.sh: no such file or directory)
+RUN sed -i 's/\r$//' /entrypoint.sh && chmod +x /entrypoint.sh
 
 VOLUME ["/models"]
 

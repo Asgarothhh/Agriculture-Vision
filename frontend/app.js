@@ -964,6 +964,8 @@ let uploadedFile = null;
 let aoiLayer = null;
 let aoiBounds = null;
 let aoiDrawHandler = null;
+/** Метаданные последнего снимка карты: crop в координатах контейнера Leaflet. */
+let lastMapCapture = null;
 let undoStack = [];
 let selectedOverlay = null;
 let editDrawMode = null;
@@ -1040,15 +1042,19 @@ function getMapGeoBounds() {
     };
 }
 
+/** Пиксели снимка → lat/lng через Web Mercator (EPSG:3857). */
 function pixelRingToLatLng(ring, imageHw, geoBounds) {
     const [h, w] = imageHw;
-    const { south, north, west, east } = geoBounds;
     const dh = Math.max(1, h - 1);
     const dw = Math.max(1, w - 1);
+    const crs = L.CRS.EPSG3857;
+    const topLeft = crs.project(L.latLng(geoBounds.north, geoBounds.west));
+    const bottomRight = crs.project(L.latLng(geoBounds.south, geoBounds.east));
     return ring.map(([x, y]) => {
-        const lat = north - (y / dh) * (north - south);
-        const lng = west + (x / dw) * (east - west);
-        return [lat, lng];
+        const mx = topLeft.x + (x / dw) * (bottomRight.x - topLeft.x);
+        const my = topLeft.y + (y / dh) * (bottomRight.y - topLeft.y);
+        const ll = crs.unproject(L.point(mx, my));
+        return [ll.lat, ll.lng];
     });
 }
 
@@ -1218,56 +1224,148 @@ function startAoiSelection() {
     });
 }
 
-/** Снимок карты (AOI или весь кадр) → File PNG для ML API. */
+const MAP_CAPTURE_TILE = 256;
+const MAP_CAPTURE_MAX_EDGE = 2048;
+const MAP_CAPTURE_MAX_ZOOM = 18;
+
+function getActiveBasemapTileUrl(z, x, y) {
+    if (tileScheme && map.hasLayer(tileScheme)) {
+        const s = ['a', 'b', 'c'][(x + y) % 3];
+        return `https://${s}.tile.openstreetmap.org/${z}/${x}/${y}.png`;
+    }
+    return `https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/${z}/${y}/${x}`;
+}
+
+function loadCorsImage(url) {
+    return new Promise((resolve, reject) => {
+        const img = new Image();
+        img.crossOrigin = 'anonymous';
+        img.onload = () => resolve(img);
+        img.onerror = () => reject(new Error(`Не удалось загрузить тайл: ${url}`));
+        img.src = url;
+    });
+}
+
+function chooseCaptureZoom(bounds) {
+    let z = Math.min(MAP_CAPTURE_MAX_ZOOM, Math.max(1, Math.round(map.getZoom())));
+    while (z < MAP_CAPTURE_MAX_ZOOM) {
+        const nw = map.project(bounds.getNorthWest(), z + 1);
+        const se = map.project(bounds.getSouthEast(), z + 1);
+        const w = Math.abs(se.x - nw.x);
+        const h = Math.abs(se.y - nw.y);
+        if (Math.max(w, h) > MAP_CAPTURE_MAX_EDGE) break;
+        z += 1;
+    }
+    // если на текущем зуме слишком мелко — всё равно поднимем до разумного минимума
+    while (z < MAP_CAPTURE_MAX_ZOOM) {
+        const nw = map.project(bounds.getNorthWest(), z);
+        const se = map.project(bounds.getSouthEast(), z);
+        if (Math.min(Math.abs(se.x - nw.x), Math.abs(se.y - nw.y)) >= 256) break;
+        z += 1;
+    }
+    return z;
+}
+
+/**
+ * Снимок AOI/кадра: мозаика тайлов (без html2canvas — он даёт белую сетку и низкое качество).
+ */
 async function captureMapRegionAsFile() {
-    if (!map || typeof html2canvas !== 'function') {
-        throw new Error('html2canvas не загрузился — проверьте интернет/CDN');
+    if (!map) throw new Error('Карта ещё не готова');
+
+    let bounds = (aoiBounds && aoiBounds.isValid()) ? aoiBounds : map.getBounds();
+    // Пересечение с видимым кадром — не тянем то, чего нет на экране
+    bounds = L.latLngBounds(
+        [
+            Math.max(bounds.getSouth(), map.getBounds().getSouth()),
+            Math.max(bounds.getWest(), map.getBounds().getWest()),
+        ],
+        [
+            Math.min(bounds.getNorth(), map.getBounds().getNorth()),
+            Math.min(bounds.getEast(), map.getBounds().getEast()),
+        ],
+    );
+    if (!bounds.isValid() || bounds.getSouth() >= bounds.getNorth() || bounds.getWest() >= bounds.getEast()) {
+        bounds = map.getBounds();
     }
 
-    const bounds = (aoiBounds && aoiBounds.isValid()) ? aoiBounds : map.getBounds();
-    const wasAoiVisible = !!(aoiLayer && map.hasLayer(aoiLayer));
-    if (wasAoiVisible) map.removeLayer(aoiLayer);
+    const zoom = chooseCaptureZoom(bounds);
+    const nwPix = map.project(bounds.getNorthWest(), zoom);
+    const sePix = map.project(bounds.getSouthEast(), zoom);
+    const minX = Math.min(nwPix.x, sePix.x);
+    const maxX = Math.max(nwPix.x, sePix.x);
+    const minY = Math.min(nwPix.y, sePix.y);
+    const maxY = Math.max(nwPix.y, sePix.y);
 
-    // спрячем UI поверх карты на время скрина
-    const panel = document.getElementById('map-seg-panel');
-    const topActions = document.querySelector('.map-top-actions');
-    const toolbar = document.getElementById('map-toolbar');
-    const hide = [panel, topActions, toolbar, document.getElementById('more-menu')];
-    const prev = hide.map(el => el ? el.style.visibility : null);
-    hide.forEach(el => { if (el) el.style.visibility = 'hidden'; });
+    let outW = Math.max(64, Math.round(maxX - minX));
+    let outH = Math.max(64, Math.round(maxY - minY));
+    // ограничение размера для ML
+    const scale = Math.min(1, MAP_CAPTURE_MAX_EDGE / Math.max(outW, outH));
+    outW = Math.max(64, Math.round(outW * scale));
+    outH = Math.max(64, Math.round(outH * scale));
 
-    try {
-        await new Promise(r => setTimeout(r, 80));
-        const full = await html2canvas(map.getContainer(), {
-            useCORS: true,
-            allowTaint: true,
-            logging: false,
-            backgroundColor: null,
-            scale: 1,
-        });
+    const tileMinX = Math.floor(minX / MAP_CAPTURE_TILE);
+    const tileMaxX = Math.floor((maxX - 1e-6) / MAP_CAPTURE_TILE);
+    const tileMinY = Math.floor(minY / MAP_CAPTURE_TILE);
+    const tileMaxY = Math.floor((maxY - 1e-6) / MAP_CAPTURE_TILE);
+    const worldTiles = 2 ** zoom;
 
-        const nw = map.latLngToContainerPoint(bounds.getNorthWest());
-        const se = map.latLngToContainerPoint(bounds.getSouthEast());
-        const x = Math.max(0, Math.floor(Math.min(nw.x, se.x)));
-        const y = Math.max(0, Math.floor(Math.min(nw.y, se.y)));
-        const w = Math.max(64, Math.ceil(Math.abs(se.x - nw.x)));
-        const h = Math.max(64, Math.ceil(Math.abs(se.y - nw.y)));
-        const maxX = Math.min(full.width - x, w);
-        const maxY = Math.min(full.height - y, h);
+    const mosaicW = (tileMaxX - tileMinX + 1) * MAP_CAPTURE_TILE;
+    const mosaicH = (tileMaxY - tileMinY + 1) * MAP_CAPTURE_TILE;
+    const mosaic = document.createElement('canvas');
+    mosaic.width = mosaicW;
+    mosaic.height = mosaicH;
+    const mctx = mosaic.getContext('2d');
+    mctx.fillStyle = '#1a1a1a';
+    mctx.fillRect(0, 0, mosaicW, mosaicH);
 
-        const crop = document.createElement('canvas');
-        crop.width = maxX;
-        crop.height = maxY;
-        crop.getContext('2d').drawImage(full, x, y, maxX, maxY, 0, 0, maxX, maxY);
-
-        const blob = await new Promise((resolve, reject) => {
-            crop.toBlob(b => (b ? resolve(b) : reject(new Error('toBlob failed'))), 'image/png');
-        });
-        return new File([blob], `map_aoi_${Date.now()}.png`, { type: 'image/png' });
-    } finally {
-        hide.forEach((el, i) => { if (el) el.style.visibility = prev[i] || ''; });
-        if (wasAoiVisible && aoiLayer) aoiLayer.addTo(map);
+    const jobs = [];
+    for (let ty = tileMinY; ty <= tileMaxY; ty++) {
+        for (let tx = tileMinX; tx <= tileMaxX; tx++) {
+            const wrappedX = ((tx % worldTiles) + worldTiles) % worldTiles;
+            if (ty < 0 || ty >= worldTiles) continue;
+            const url = getActiveBasemapTileUrl(zoom, wrappedX, ty);
+            const dx = (tx - tileMinX) * MAP_CAPTURE_TILE;
+            const dy = (ty - tileMinY) * MAP_CAPTURE_TILE;
+            jobs.push(
+                loadCorsImage(url)
+                    .then(img => { mctx.drawImage(img, dx, dy); })
+                    .catch(() => { /* битый тайл — оставляем фон */ }),
+            );
+        }
     }
+    await Promise.all(jobs);
+
+    const cropX = minX - tileMinX * MAP_CAPTURE_TILE;
+    const cropY = minY - tileMinY * MAP_CAPTURE_TILE;
+    const srcW = Math.max(1, maxX - minX);
+    const srcH = Math.max(1, maxY - minY);
+
+    const out = document.createElement('canvas');
+    out.width = outW;
+    out.height = outH;
+    const octx = out.getContext('2d');
+    octx.imageSmoothingEnabled = true;
+    octx.imageSmoothingQuality = 'high';
+    octx.drawImage(mosaic, cropX, cropY, srcW, srcH, 0, 0, outW, outH);
+
+    const geoBounds = {
+        north: bounds.getNorth(),
+        south: bounds.getSouth(),
+        west: bounds.getWest(),
+        east: bounds.getEast(),
+    };
+    lastMapCapture = {
+        mode: 'tiles',
+        zoom,
+        width: outW,
+        height: outH,
+        geoBounds: { ...geoBounds },
+    };
+
+    const blob = await new Promise((resolve, reject) => {
+        out.toBlob(b => (b ? resolve(b) : reject(new Error('toBlob failed'))), 'image/jpeg', 0.92);
+    });
+    return new File([blob], `map_aoi_${Date.now()}.jpg`, { type: 'image/jpeg' });
 }
 
 async function callSegmentationApi(file, architecture, threshold) {
@@ -1480,8 +1578,14 @@ function initMap() {
 
     L.control.zoom({ position: 'bottomleft' }).addTo(map);
 
-    tileSatellite = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', { attribution: 'Tiles &copy; Esri' });
-    tileScheme = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { attribution: '&copy; OpenStreetMap' });
+    tileSatellite = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {
+        attribution: 'Tiles &copy; Esri',
+        crossOrigin: true,
+    });
+    tileScheme = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+        attribution: '&copy; OpenStreetMap',
+        crossOrigin: true,
+    });
     tileSatellite.addTo(map);
 
     const coordsDisplay = document.getElementById('coords-display');
@@ -2801,9 +2905,11 @@ function runSegmentation(architecture, opts = {}) {
             if (opts.preferUpload && uploadedFile) {
                 sourceFile = uploadedFile;
                 sourceLabel = uploadedFile.name;
+                lastMapCapture = null;
             } else if (uploadedFile && opts.forceUpload) {
                 sourceFile = uploadedFile;
                 sourceLabel = uploadedFile.name;
+                lastMapCapture = null;
             } else {
                 setMapSegStatus('Снимаю выделенную область с карты…');
                 sourceFile = await captureMapRegionAsFile();
@@ -2813,7 +2919,9 @@ function runSegmentation(architecture, opts = {}) {
             setMapSegProgress(45);
             if (bar) bar.style.width = '45%';
 
-            const geoBounds = getMapGeoBounds();
+            const geoBounds = lastMapCapture?.geoBounds
+                ? { ...lastMapCapture.geoBounds }
+                : getMapGeoBounds();
             clearMapWorkspace({ keepFolders: true });
             if (aoiLayer && map && !map.hasLayer(aoiLayer)) aoiLayer.addTo(map);
 
