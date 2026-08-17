@@ -41,13 +41,31 @@ class ModelSettings:
     threshold: float = 0.5
     tta: bool = False
     letterbox: bool = True
-    sliding_stride: int = 256
+    sliding_stride: int = 384
     sliding_tta: bool = False
+    # решение принимает модель; эвристики по RGB — только если включить явно
+    pseudo_nir: str = "green"  # green | exg | red
+    rgb_blend: float = 0.0
+    keep_largest: bool = False
+    rgb_fallback: bool = False
+    mask_morph_open_px: int = 5
     max_side_px: int = 4096
     max_upload_bytes: int = 50 * 1024 * 1024
     headland_margin_px: int = 12
     polygon_simplify: float = 2.5
     min_polygon_area_px: float = 500.0
+    # границы полей для карты: сглаживание рваного края маски
+    field_mask_open_px: int = 3
+    field_mask_close_px: int = 9
+    field_mask_blur_px: int = 5
+    field_smooth_px: float = 6.0
+    field_simplify_px: float = 6.0
+    field_min_area_px: float = 4000.0
+    field_max_polygons: int = 200
+    # деление сплошной пашни на отдельные участки по межам/дорогам на снимке
+    split_parcels: bool = True
+    parcel_ridge_quantile: float = 0.80
+    parcel_boundary_sigma: float = 2.0
     include_geojson: bool = False
     geo_origin_lat: float = 55.75
     geo_origin_lon: float = 37.62

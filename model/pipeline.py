@@ -11,7 +11,11 @@ import cv2
 import numpy as np
 from PIL import Image
 
-from field_detecter.polygon import mask_to_navigable_polygon, polygon_to_geojson_feature
+from field_detecter.polygon import (
+    mask_to_field_polygons,
+    mask_to_navigable_polygon,
+    polygon_to_geojson_feature,
+)
 from field_detecter.seg_infer import (
     crop_mask_from_letterbox,
     letterbox_image,
@@ -20,7 +24,7 @@ from field_detecter.seg_infer import (
 )
 from model import inference as infer_fp16
 from model.runtime import SegmentationRuntime
-from model.schemas import PolygonPayload, SegmentMetrics, SegmentRequest, SegmentResponse
+from model.schemas import PolygonItem, PolygonPayload, SegmentMetrics, SegmentRequest, SegmentResponse
 from model.settings import ModelSettings
 
 
@@ -62,13 +66,14 @@ def _prepare_4ch(
     *,
     tile_size: int,
     letterbox: bool,
+    pseudo_nir: str = "green",
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, dict | None]:
     letterbox_meta = None
     rgb_infer = rgb
     if letterbox:
         rgb_infer, nir_lb, letterbox_meta = letterbox_image(rgb, nir, tile_size)
         nir = nir_lb
-    image_4ch = load_rgb_nir_from_array(rgb_infer, nir)
+    image_4ch = load_rgb_nir_from_array(rgb_infer, nir, pseudo_nir=pseudo_nir)
     return rgb_infer, image_4ch, rgb, letterbox_meta
 
 
@@ -120,41 +125,49 @@ def run_segmentation(
                 interpolation=cv2.INTER_LINEAR,
             )
 
-    rgb_infer, image_4ch, _, letterbox_meta = _prepare_4ch(
-        rgb,
-        nir,
-        tile_size=tile_size,
-        letterbox=settings.letterbox,
-    )
-
-    _, h, w = image_4ch.shape
-    use_sliding = req.use_sliding or (h > tile_size or w > tile_size)
+    # Снимок крупнее тайла режем скользящим окном в нативном разрешении:
+    # letterbox сжал бы весь кадр до tile_size и убил детализацию границ.
+    h0, w0 = rgb.shape[:2]
+    use_sliding = req.use_sliding or max(h0, w0) > tile_size
 
     if use_sliding:
-        mask = infer_fp16.predict_mask_sliding(
+        rgb_infer = rgb
+        letterbox_meta = None
+        image_4ch = load_rgb_nir_from_array(rgb, nir, pseudo_nir=settings.pseudo_nir)
+        prob = infer_fp16.predict_prob_sliding(
             runtime.model,
             image_4ch,
             device,
             tile=tile_size,
             stride=settings.sliding_stride,
-            threshold=threshold,
             tta=settings.sliding_tta if req.tta is None else tta,
             fp16=fp16,
         )
-        prob = None
-        th_used = threshold
-        info = {"mode": "sliding", "threshold_used": threshold}
     else:
+        rgb_infer, image_4ch, _, letterbox_meta = _prepare_4ch(
+            rgb,
+            nir,
+            tile_size=tile_size,
+            letterbox=settings.letterbox,
+            pseudo_nir=settings.pseudo_nir,
+        )
         prob = infer_fp16.predict_prob(
             runtime.model, image_4ch, device, tta=tta, fp16=fp16
         )
-        mask, th_used, info = prob_to_mask(
-            prob, threshold, rgb_uint8=rgb_infer
-        )
-        if letterbox_meta is not None:
-            mask = crop_mask_from_letterbox(mask, letterbox_meta)
-            if prob is not None:
-                prob = crop_mask_from_letterbox(prob, letterbox_meta)
+
+    mask, th_used, info = prob_to_mask(
+        prob,
+        threshold,
+        rgb_uint8=rgb_infer,
+        rgb_blend=settings.rgb_blend,
+        keep_largest=settings.keep_largest,
+        morph_open=settings.mask_morph_open_px,
+        rgb_fallback=settings.rgb_fallback,
+    )
+    info["mode"] = f"{info.get('mode', 'prob_only')}{'_sliding' if use_sliding else ''}"
+    if letterbox_meta is not None:
+        mask = crop_mask_from_letterbox(mask, letterbox_meta)
+        prob = crop_mask_from_letterbox(prob, letterbox_meta)
 
     headland = (
         req.headland_margin_px
@@ -172,6 +185,30 @@ def run_segmentation(
         area_px=float(poly_raw["area_px"]),
         valid=bool(poly_raw["valid"]),
     )
+    field_polys = mask_to_field_polygons(
+        mask,
+        rgb if mask.shape[:2] == rgb.shape[:2] else rgb_infer,
+        split_parcels=settings.split_parcels,
+        ridge_quantile=settings.parcel_ridge_quantile,
+        boundary_sigma=settings.parcel_boundary_sigma,
+        simplify_tolerance=settings.field_simplify_px,
+        min_area_px=settings.field_min_area_px,
+        max_polygons=settings.field_max_polygons,
+        open_px=settings.field_mask_open_px,
+        close_px=settings.field_mask_close_px,
+        blur_px=settings.field_mask_blur_px,
+        smooth_px=settings.field_smooth_px,
+    )
+    polygons = [
+        PolygonItem(
+            polygon_px=[tuple(p) for p in item["polygon_px"]],
+            area_px=float(item["area_px"]),
+            valid=len(item["polygon_px"]) >= 3,
+            label="field",
+        )
+        for item in field_polys
+        if len(item["polygon_px"]) >= 3
+    ]
 
     include_geo = (
         req.include_geojson
@@ -204,6 +241,7 @@ def run_segmentation(
 
     return SegmentResponse(
         navigable=navigable,
+        polygons=polygons,
         geojson=geojson,
         mask_png_base64=mask_b64,
         image_hw=(out_h, out_w),

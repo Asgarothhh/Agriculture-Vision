@@ -8,13 +8,35 @@ serving:
   threshold: 0.5
   tta: false
   letterbox: true
-  sliding_stride: 256
+  sliding_stride: 384
   sliding_tta: false
+  # NIR-прокси для снимков без NIR: green | exg | red
+  pseudo_nir: green
+  # доля RGB-эвристики в решении (0 = решает только модель)
+  rgb_blend: 0.0
+  # true оставит лишь одно самое большое поле на кадр
+  keep_largest: false
+  # true разрешает чисто эвристическую маску, если модель выродилась
+  rgb_fallback: false
+  mask_morph_open_px: 5
   max_side_px: 4096
   max_upload_bytes: 52428800
   headland_margin_px: 12
   polygon_simplify: 2.5
   min_polygon_area_px: 500.0
+  # границы полей для карты (пиксели снимка): чем больше, тем ровнее контур
+  field_mask_open_px: 3
+  field_mask_close_px: 9
+  field_mask_blur_px: 5
+  field_smooth_px: 6.0
+  field_simplify_px: 6.0
+  field_min_area_px: 4000.0
+  field_max_polygons: 200
+  # деление сплошной пашни на отдельные поля по межам/дорогам на снимке
+  split_parcels: true
+  # меньше значение — дробит на больше участков
+  parcel_ridge_quantile: 0.80
+  parcel_boundary_sigma: 2.0
   include_geojson: false
   geo_origin_lat: 55.75
   geo_origin_lon: 37.62

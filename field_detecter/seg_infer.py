@@ -45,6 +45,24 @@ def load_segformer_checkpoint(
     return model, meta
 
 
+def pseudo_nir_from_rgb(rgb: np.ndarray, mode: str = "green") -> np.ndarray:
+    """
+    NIR-прокси для снимков без NIR (тайлы карты, обычные фото).
+
+    Модель обучена на NIR, где растительность яркая. Красный канал у
+    растительности как раз тёмный, поэтому его копия (прежнее поведение)
+    подавала в модель почти инверсный сигнал. Зелёный ближе к NIR и по
+    уровню, и по поведению; "exg" дополнительно усиливает вегетацию.
+    """
+    if mode == "red":
+        return rgb[..., 0].copy()
+    green = rgb[..., 1].astype(np.float32)
+    if mode == "exg":
+        red = rgb[..., 0].astype(np.float32)
+        return np.clip(green + (green - red), 0, 255).astype(np.uint8)
+    return green.astype(np.uint8)
+
+
 def letterbox_image(
     rgb: np.ndarray,
     nir: np.ndarray | None,
@@ -58,7 +76,7 @@ def letterbox_image(
     canvas = np.zeros((tile_size, tile_size, 3), dtype=rgb.dtype)
     canvas[:nh, :nw] = rgb_lb
     if nir is None:
-        nir = rgb[..., 0]
+        nir = pseudo_nir_from_rgb(rgb)
     nir_lb = cv2.resize(nir, (nw, nh), interpolation=cv2.INTER_LINEAR)
     nir_canvas = np.zeros((tile_size, tile_size), dtype=nir.dtype)
     nir_canvas[:nh, :nw] = nir_lb
@@ -115,7 +133,7 @@ def load_rgb_nir(
                 nir = cv2.resize(nir, (tile_size, tile_size), interpolation=cv2.INTER_LINEAR)
 
     if nir is None:
-        nir = rgb[..., 0].copy()
+        nir = pseudo_nir_from_rgb(rgb)
 
     image_4ch = np.stack([nir, rgb[..., 0], rgb[..., 1], rgb[..., 2]], axis=0).astype(
         np.float32
@@ -234,20 +252,23 @@ def prob_to_mask(
     threshold: float = 0.5,
     *,
     rgb_uint8: np.ndarray | None = None,
-    max_area_frac: float = 0.65,
-    keep_largest: bool = True,
+    rgb_blend: float = 0.0,
+    max_area_frac: float = 1.0,
+    keep_largest: bool = False,
     morph_open: int = 5,
-    auto_raise_threshold: bool = True,
+    auto_raise_threshold: bool = False,
+    rgb_fallback: bool = False,
 ) -> tuple[np.ndarray, float, dict[str, float]]:
     """
-    Вероятность → бинарная маска поля.
+    Вероятность → бинарная маска поля по заданному порогу.
 
-  На снимках вне Ag-Vision prob часто «залипает» около 1.0 — тогда используется
-    комбинация ExG + низких границ (поле vs застройка).
+    Решение принимает модель: `threshold` применяется к prob как есть.
+    rgb_blend > 0 подмешивает ExG/границы, rgb_fallback=True разрешает
+    полностью эвристическую маску, если prob выродилась в константу.
     """
-    if rgb_uint8 is not None and _prob_is_saturated(prob):
+    if rgb_uint8 is not None and rgb_fallback and _prob_is_saturated(prob):
         mask, score_map, hinfo = _mask_from_rgb_heuristic(
-            rgb_uint8, max_area_frac=max_area_frac
+            rgb_uint8, max_area_frac=min(max_area_frac, 0.65)
         )
         info = {
             "threshold_used": hinfo["score_th"],
@@ -261,13 +282,15 @@ def prob_to_mask(
         return mask, hinfo["score_th"], info
 
     th = float(threshold)
-    score = prob.copy()
-    if rgb_uint8 is not None:
+    score = prob.astype(np.float32, copy=True)
+    mode = "prob_only"
+    if rgb_uint8 is not None and rgb_blend > 0.0:
+        blend = float(min(rgb_blend, 1.0))
         exg = excess_green(rgb_uint8)
         edges = _edge_density(cv2.cvtColor(rgb_uint8, cv2.COLOR_RGB2GRAY))
-        score = 0.55 * prob + 0.30 * exg + 0.15 * (1.0 - edges)
-        score = (score - score.min()) / (score.max() - score.min() + 1e-6)
-        th = float(np.quantile(score, 0.70))
+        hint = 0.5 * exg + 0.5 * (1.0 - edges)
+        score = (1.0 - blend) * score + blend * hint
+        mode = "prob_rgb_blend"
 
     mask = (score >= th).astype(np.uint8)
 
@@ -293,7 +316,7 @@ def prob_to_mask(
         "prob_std": float(prob.std()),
         "prob_max": float(prob.max()),
         "prob_p90": float(np.quantile(prob, 0.9)),
-        "mode": "prob_combined" if rgb_uint8 is not None else "prob_only",
+        "mode": mode,
         "score_map": score,
     }
     return mask, th, info
@@ -395,10 +418,12 @@ def predict_field_mask(
 def load_rgb_nir_from_array(
     rgb: np.ndarray,
     nir: np.ndarray | None = None,
+    *,
+    pseudo_nir: str = "green",
 ) -> np.ndarray:
     """RGB H×W×3 uint8 → 4ch float CHW."""
     if nir is None:
-        nir = rgb[..., 0]
+        nir = pseudo_nir_from_rgb(rgb, pseudo_nir)
     image_4ch = np.stack([nir, rgb[..., 0], rgb[..., 1], rgb[..., 2]], axis=0).astype(
         np.float32
     )

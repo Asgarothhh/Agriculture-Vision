@@ -9,3 +9,6 @@ model/weights/*.pth
 data/agvision/
 data/uploads/*
 !data/uploads/.gitkeep
+web/node_modules/
+web/data/
+web/.env

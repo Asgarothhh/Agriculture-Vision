@@ -20,6 +20,13 @@ class PolygonPayload(BaseModel):
     valid: bool
 
 
+class PolygonItem(BaseModel):
+    polygon_px: list[tuple[int, int]]
+    area_px: float
+    valid: bool = True
+    label: str = "field"
+
+
 class SegmentMetrics(BaseModel):
     threshold_used: float
     area_frac: float
@@ -34,6 +41,7 @@ class SegmentMetrics(BaseModel):
 class SegmentResponse(BaseModel):
     ok: bool = True
     navigable: PolygonPayload
+    polygons: list[PolygonItem] = Field(default_factory=list)
     geojson: dict[str, Any] | None = None
     mask_png_base64: str | None = None
     image_hw: tuple[int, int]
@@ -48,6 +56,8 @@ class HealthResponse(BaseModel):
     device: str | None = None
     fp16: bool | None = None
     checkpoint: str | None = None
+    available_models: list[str] = Field(default_factory=list)
+    hint: str | None = None
 
 
 class JobStatusResponse(BaseModel):
