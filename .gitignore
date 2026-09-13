@@ -19,8 +19,11 @@ data/uploads/*
 !data/uploads/.gitkeep
 
 web/node_modules/
+core/node_modules/
 web/data/
+core/data/
 web/.env
+core/.env
 
 doc/.~lock.*
 core/doc/.~lock.*

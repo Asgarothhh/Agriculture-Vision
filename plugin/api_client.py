@@ -1,4 +1,4 @@
-"""HTTP-клиент к Agriculture Vision API (FastAPI backend из папки web/)."""
+"""HTTP-клиент к Agriculture Vision API (FastAPI в core/)."""
 
 from __future__ import annotations
 

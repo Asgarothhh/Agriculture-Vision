@@ -10,6 +10,7 @@ import pg from 'pg';
 
 const app = express();
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const WEB_DIR = path.join(__dirname, '..', 'web');
 const PORT = process.env.PORT ? Number(process.env.PORT) : 5173;
 // Локально: uvicorn model.app:app (8080). В Docker: ML_BACKEND_URL=http://backend:8080
 const ML_BACKEND_URL = process.env.ML_BACKEND_URL || 'http://localhost:8080';
@@ -305,10 +306,10 @@ app.delete('/api/account', requireAuth, async (req, res) => {
   }
 });
 
-app.use(express.static(__dirname));
+app.use(express.static(WEB_DIR));
 
 app.get('*', (req, res) => {
-  res.sendFile(path.join(__dirname, 'index.html'));
+  res.sendFile(path.join(WEB_DIR, 'index.html'));
 });
 
 await waitForDb();

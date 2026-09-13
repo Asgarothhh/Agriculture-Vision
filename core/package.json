@@ -1,9 +1,9 @@
 {
-  "name": "agriculture-vision-demo",
+  "name": "agriculture-vision-backend",
   "version": "1.0.0",
   "private": true,
   "type": "module",
-  "description": "Agriculture Vision web UI + auth + ML proxy.",
+  "description": "Auth BFF + ML proxy for Agriculture Vision.",
   "scripts": {
     "dev": "node server.js",
     "start": "node server.js"

@@ -10,8 +10,8 @@
 
 | Ветка | Папка | Кто |
 |-------|--------|-----|
-| `core` | `core/` | обучение, веса, FastAPI |
-| `web` | `web/` | UI + Express |
+| `core` | `core/` | обучение, FastAPI, Express (JWT/прокси) |
+| `web` | `web/` | только UI (HTML/JS/CSS) |
 | `plugin` | `plugin/` | QGIS, только HTTP к core |
 | `docker` | всё дерево | интеграционный снимок (пока default на GitHub — старый `main`) |
 
@@ -77,7 +77,7 @@ uvicorn model.app:app --host 0.0.0.0 --port 8080
 Опционально Node с JWT (проксирует ML на `:8080`):
 
 ```bash
-cd web && npm install && npm start
+cd core && npm install && npm start
 ```
 
 QGIS: каталог [`plugin/`](plugin/).
@@ -85,11 +85,12 @@ QGIS: каталог [`plugin/`](plugin/).
 ## Структура
 
 ```
-core/                   # ветка core
+core/                   # ветка core: весь бэк
   field_detecter/       # датасет, SegFormer, YOLO, полигоны
   model/                # FastAPI + FP16
+  server.js             # Express: JWT, Postgres, прокси на FastAPI
   config/agvision.yaml
   scripts/
-web/                    # ветка web
+web/                    # ветка web: только фронт
 plugin/                 # ветка plugin (HTTP-клиент, без torch)
 ```
