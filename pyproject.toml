@@ -3,15 +3,15 @@ requires = ["setuptools>=61"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "field-detecter"
+name = "agriculture-vision-services"
 version = "0.1.0"
-description = "SegFormer field boundaries + FastAPI serving"
+description = "Agriculture Vision ML core and segmentation service"
 readme = "README.md"
 requires-python = ">=3.10"
 
 [tool.setuptools.package-dir]
-"" = "core"
+"" = "app"
 
 [tool.setuptools.packages.find]
-where = ["core"]
-include = ["field_detecter*", "model*"]
+where = ["app"]
+include = ["ml_core*", "segmentation_service*"]

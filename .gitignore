@@ -8,22 +8,21 @@ core/outputs/
 .vscode/
 .ipynb_checkpoints/
 
-core/model/weights/*.pth
-!core/model/weights/.gitkeep
-model/weights/*.pth
-!model/weights/.gitkeep
+app/segmentation_service/weights/*.pth
+!app/segmentation_service/weights/.gitkeep
 
 data/agvision/
-core/data/agvision/
+app/ml_core/data/agvision/
 data/uploads/*
 !data/uploads/.gitkeep
 
-web/node_modules/
-core/node_modules/
+app/api_gateway/node_modules/
+app/users_service/node_modules/
 web/data/
-core/data/
+app/users_service/data/
 web/.env
-core/.env
+app/api_gateway/.env
+app/users_service/.env
+app/segmentation_service/.env
 
 doc/.~lock.*
-core/doc/.~lock.*
