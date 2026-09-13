@@ -1,0 +1,9 @@
+[general]
+name=Agriculture Vision
+description=Сегментация полей (YOLO/SegFormer) и классификация культур через Agriculture Vision API
+version=1.0.0
+qgisMinimumVersion=4.0
+author=Your Team
+email=you@example.com
+category=Analysis
+tags=agriculture,segmentation,yolo,segformer,classification,AI

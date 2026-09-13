@@ -1,4 +1,4 @@
-"""Загрузка config/agvision.yaml."""
+"""Загрузка core/config/agvision.yaml."""
 
 from __future__ import annotations
 
@@ -15,7 +15,8 @@ def load_config(path: str | Path | None = None) -> dict[str, Any]:
         path = _ROOT / "config" / "agvision.yaml"
     path = Path(path)
     if not path.is_absolute():
-        path = _ROOT / path
+        cwd_path = Path.cwd() / path
+        path = cwd_path if cwd_path.is_file() else _ROOT / path
     with path.open(encoding="utf-8") as f:
         return yaml.safe_load(f)
 

@@ -1,3 +1,4 @@
+# docker build -f core/docker/Dockerfile core
 FROM pytorch/pytorch:2.3.0-cuda11.8-cudnn8-devel
 
 RUN apt-get update && apt-get install -y --no-install-recommends \

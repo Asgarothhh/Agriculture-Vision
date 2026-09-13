@@ -14,7 +14,7 @@
 Скачивание:
 
 ```bash
-python scripts/download_agvision.py --extract
+python core/scripts/download_agvision.py --extract
 ```
 
 Ожидаемая структура после распаковки:

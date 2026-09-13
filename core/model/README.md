@@ -1,6 +1,6 @@
 # Model serving — SegFormer FP16 + HTTP API
 
-Веса лежат в **`model/weights/`** (`best_iou.pth`, `last_epoch.pth`). Обучение пишет сюда же (`config/agvision.yaml` → `output_dir: model/weights`).
+Веса лежат в **`core/model/weights/`** (`best_iou.pth`, `last_epoch.pth`). Обучение пишет сюда же (`core/config/agvision.yaml` → `output_dir: model/weights` относительно `core/`).
 
 ## Структура
 
@@ -18,7 +18,7 @@ model/
 ## Запуск
 
 ```bash
-pip install -r requirements.txt -r model/requirements.txt
+pip install -e . -r core/requirements.txt -r core/model/requirements.txt
 
 python -m model --rgb photo.jpg --out result.json
 uvicorn model.app:app --host 0.0.0.0 --port 8080

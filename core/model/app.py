@@ -20,7 +20,8 @@ from model.runtime import SegmentationRuntime
 from model.schemas import HealthResponse, JobStatusResponse, SegmentRequest, SegmentResponse
 from model.settings import load_settings
 
-_REPO_ROOT = Path(__file__).resolve().parents[1]
+_CORE_ROOT = Path(__file__).resolve().parents[1]
+_REPO_ROOT = _CORE_ROOT.parent
 _WEB_DIR = _REPO_ROOT / "web"
 
 _runtime: SegmentationRuntime | None = None
@@ -174,7 +175,8 @@ def _health_payload() -> HealthResponse:
     if not loaded:
         hint = (
             "На ML-сервере нет весов моделей (best_iou.pth). "
-            "Положите чекпоинт в model/weights/best_iou.pth"
+            "На ML-сервере нет весов моделей (best_iou.pth). "
+            "Положите чекпоинт в core/model/weights/best_iou.pth"
         )
     return HealthResponse(
         status="ok",

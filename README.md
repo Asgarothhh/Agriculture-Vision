@@ -4,6 +4,19 @@
 
 Метрики по ТЗ §5.1: IoU ≥ 0.90, Recall ≥ 0.95, Precision ≥ 0.90 (поля); F1 ≥ 0.80 (точки, на pseudo-GT).
 
+## Ветки (три команды)
+
+Один коммит-база, дальше каждая команда только в своей папке. В `main` — merge из трёх, не друг в друга.
+
+| Ветка | Папка | Кто |
+|-------|--------|-----|
+| `core` | `core/` | обучение, веса, FastAPI |
+| `web` | `web/` | UI + Express |
+| `plugin` | `plugin/` | QGIS, только HTTP к core |
+| `docker` | всё дерево | интеграционный снимок (пока default на GitHub — старый `main`) |
+
+Поток: `docker` (или `main`) → своя ветка каждый день; готовое — PR **в `docker`/`main`**.
+
 ## Результаты
 
 - Первый прогон
@@ -30,41 +43,53 @@ Epoch: 12 val: {'iou_mean': 0.9461152559973611, 'precision_mean': 0.951315340951
 ```bash
 python -m venv .venv
 source .venv/bin/activate
-pip install -r requirements.txt
+pip install -e . -r core/requirements.txt -r core/model/requirements.txt
 
 # 1. Скачать Agriculture-Vision (~21 GB)
-python scripts/download_agvision.py --extract
+python core/scripts/download_agvision.py --extract
 
-# 2. Обучение SegFormer (NIR+RGB, аугментации, устойчивость к шуму)
-python -m field_detecter.train_seg --config config/agvision.yaml
+# 2. Обучение SegFormer
+python -m field_detecter.train_seg --config core/config/agvision.yaml
 # или на ночь:
-bash scripts/train_seg_overnight.sh
+bash core/scripts/train_seg_overnight.sh
 
 # 3. Псевдоразметка + YOLO26
-python -m field_detecter.pseudo_points --config config/agvision.yaml
-python -m field_detecter.train_det --config config/agvision.yaml
+python -m field_detecter.pseudo_points --config core/config/agvision.yaml
+python -m field_detecter.train_det --config core/config/agvision.yaml
 ```
 
-Блокнот end-to-end: [`notebooks/train_field_vit.ipynb`](notebooks/train_field_vit.ipynb)
+Блокнот end-to-end: [`core/notebooks/train_field_vit.ipynb`](core/notebooks/train_field_vit.ipynb)
 
-Тест инференса и полигоны: [`notebooks/test_segmentation_polygons.ipynb`](notebooks/test_segmentation_polygons.ipynb)
+Тест инференса и полигоны: [`core/notebooks/test_segmentation_polygons.ipynb`](core/notebooks/test_segmentation_polygons.ipynb)
 
-Конфиг: [`config/agvision.yaml`](config/agvision.yaml)
+Конфиг: [`core/config/agvision.yaml`](core/config/agvision.yaml)
 
 ## Продакшен (FP16 + API)
 
-Слой интеграции: [`model/README.md`](model/README.md) — веса в `model/weights/best_iou.pth`, FP16, FastAPI, CLI `python -m model`.
+Слой интеграции: [`core/model/README.md`](core/model/README.md) — веса в `core/model/weights/best_iou.pth`, FP16, FastAPI, CLI `python -m model`.
+
+```bash
+uvicorn model.app:app --host 0.0.0.0 --port 8080
+```
+
+Откройте [http://localhost:8080](http://localhost:8080). Сегментация: `POST /api/v1/segmentation/segment`. Нужен чекпоинт `core/model/weights/best_iou.pth`.
+
+Опционально Node с JWT (проксирует ML на `:8080`):
+
+```bash
+cd web && npm install && npm start
+```
+
+QGIS: каталог [`plugin/`](plugin/).
 
 ## Структура
 
 ```
-field_detecter/
-  agvision_dataset.py   # 4ch + boundary + valid mask
-  train_seg.py          # SegFormer-B4
-  pseudo_points.py      # pseudo tree/pole
-  train_det.py          # YOLO26
-  metrics.py            # IoU, P, R, F1 + отчёт ТЗ
-  polygon.py            # маска → GeoJSON
-scripts/download_agvision.py
-config/agvision.yaml
+core/                   # ветка core
+  field_detecter/       # датасет, SegFormer, YOLO, полигоны
+  model/                # FastAPI + FP16
+  config/agvision.yaml
+  scripts/
+web/                    # ветка web
+plugin/                 # ветка plugin (HTTP-клиент, без torch)
 ```

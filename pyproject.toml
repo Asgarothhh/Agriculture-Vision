@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "field-detecter"
+version = "0.1.0"
+description = "SegFormer field boundaries + FastAPI serving"
+readme = "README.md"
+requires-python = ">=3.10"
+
+[tool.setuptools.package-dir]
+"" = "core"
+
+[tool.setuptools.packages.find]
+where = ["core"]
+include = ["field_detecter*", "model*"]
