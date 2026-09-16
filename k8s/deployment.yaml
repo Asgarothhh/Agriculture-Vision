@@ -1,0 +1,29 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ml-fastapi-app
+  namespace: ml-service
+  labels:
+    app: ml-fastapi-app
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: ml-fastapi-app
+  template:
+    metadata:
+      labels:
+        app: ml-fastapi-app
+    spec:
+      containers:
+      - name: fastapi-container
+        image: IMAGE_PLACEHOLDER
+        ports:
+        - containerPort: 8000
+        resources:
+          requests:
+            cpu: "500m"
+            memory: "1Gi"
+          limits:
+            cpu: "2"
+            memory: "4Gi"
