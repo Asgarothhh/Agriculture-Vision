@@ -26,3 +26,5 @@ app/users_service/.env
 app/segmentation_service/.env
 
 doc/.~lock.*
+field_dataset_builder/
+оцифровки ЦПТЗ\ /
