@@ -27,3 +27,4 @@ core/.env
 
 doc/.~lock.*
 core/doc/.~lock.*
+.env
