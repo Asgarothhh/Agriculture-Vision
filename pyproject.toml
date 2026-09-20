@@ -5,13 +5,40 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "agriculture-vision-services"
 version = "0.1.0"
-description = "Agriculture Vision ML core and segmentation service"
+description = "Agriculture Vision FastAPI backend, ML core and segmentation service"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.12"
+dynamic = ["dependencies"]
+
+[tool.setuptools.dynamic]
+dependencies = {file = ["requirements.txt"]}
+
+[tool.setuptools]
+packages = [
+    "app",
+    "app.core",
+    "app.users_service",
+    "app.users_service.routers",
+    "app.activity_service",
+    "app.activity_service.routers",
+    "app.layers_service",
+    "app.layers_service.routers",
+    "app.tasks_service",
+    "app.tasks_service.routers",
+    "app.ml_service",
+    "app.ml_service.routers",
+    "app.dzz_service",
+    "app.dzz_service.routers",
+    "ml_core",
+    "segmentation_service",
+]
 
 [tool.setuptools.package-dir]
-"" = "app"
+"app" = "app"
+"ml_core" = "app/ml_core"
+"segmentation_service" = "app/segmentation_service"
 
-[tool.setuptools.packages.find]
-where = ["app"]
-include = ["ml_core*", "segmentation_service*"]
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+filterwarnings = ["ignore::DeprecationWarning"]
