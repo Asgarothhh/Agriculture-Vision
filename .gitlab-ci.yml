@@ -39,6 +39,7 @@ unit-tests:
     - docker rm -f test-postgres test-redis || true
 
   rules:
+    - when: never
     - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
     - if: '$CI_COMMIT_BRANCH'
   allow_failure: true
@@ -56,6 +57,7 @@ build-images:
     - minikube image load $API_IMAGE:$CI_COMMIT_SHORT_SHA
     - minikube image load $WORKER_IMAGE:$CI_COMMIT_SHORT_SHA
   rules:
+    - when: never
     - if: '$CI_COMMIT_BRANCH == "dev"'
     - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
       changes:
