@@ -20,7 +20,7 @@ unit-tests:
     # Удаляем зависший контейнер, если прошлый пайплайн упал
     - docker rm -f test-postgres || true
     # Запускаем чистую БД. Она автоматически создаст базу из переменной POSTGRES_DB
-    - docker run -d --name test-postgres -p 5432:5432 -e POSTGRES_USER=${POSTGRES_USER:-developer} -e POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-CHANGE_ME} -e POSTGRES_DB=${POSTGRES_DB:-agriculture-vision} postgres:15
+    - docker run -d --name test-postgres -p 5432:5432 -e POSTGRES_USER=${POSTGRES_USER:-developer} -e POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-CHANGE_ME} -e POSTGRES_DB=${POSTGRES_DB:-agriculture-vision} postgis/postgis:15-3.4
     - echo "Ожидание инициализации PostgreSQL..."
     - sleep 5
 
