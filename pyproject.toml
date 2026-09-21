@@ -3,15 +3,42 @@ requires = ["setuptools>=61"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "field-detecter"
+name = "agriculture-vision-services"
 version = "0.1.0"
-description = "SegFormer field boundaries + FastAPI serving"
+description = "Agriculture Vision FastAPI backend, ML core and segmentation service"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.12"
+dynamic = ["dependencies"]
+
+[tool.setuptools.dynamic]
+dependencies = {file = ["requirements.txt"]}
+
+[tool.setuptools]
+packages = [
+    "app",
+    "app.core",
+    "app.users_service",
+    "app.users_service.routers",
+    "app.activity_service",
+    "app.activity_service.routers",
+    "app.layers_service",
+    "app.layers_service.routers",
+    "app.tasks_service",
+    "app.tasks_service.routers",
+    "app.ml_service",
+    "app.ml_service.routers",
+    "app.dzz_service",
+    "app.dzz_service.routers",
+    "ml_core",
+    "segmentation_service",
+]
 
 [tool.setuptools.package-dir]
-"" = "core"
+"app" = "app"
+"ml_core" = "app/ml_core"
+"segmentation_service" = "app/segmentation_service"
 
-[tool.setuptools.packages.find]
-where = ["core"]
-include = ["field_detecter*", "model*"]
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+filterwarnings = ["ignore::DeprecationWarning"]

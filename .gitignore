@@ -1,30 +1,36 @@
 .venv/
 __pycache__/
 *.pyc
+*.pyo
+.pytest_cache/
+.coverage
+htmlcov/
 runs/
 outputs/
 core/outputs/
 .idea/
 .vscode/
+.cursor/
 .ipynb_checkpoints/
+spec/
 
-core/model/weights/*.pth
-!core/model/weights/.gitkeep
-model/weights/*.pth
-!model/weights/.gitkeep
+.env
+*.egg-info/
+dist/
+build/
+
+
+app/segmentation_service/weights/*.pth
+!app/segmentation_service/weights/.gitkeep
 
 data/agvision/
-core/data/agvision/
+app/ml_core/data/agvision/
 data/uploads/*
 !data/uploads/.gitkeep
 
-web/node_modules/
-core/node_modules/
-web/data/
-core/data/
-web/.env
-core/.env
+deploy/nginx/ssl/*.pem
+deploy/nginx/ssl/*.key
+deploy/nginx/ssl/*.crt
 
 doc/.~lock.*
-core/doc/.~lock.*
-.env
+
