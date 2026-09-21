@@ -50,8 +50,8 @@ build-images:
     - echo "Сборка Docker-образов API и Worker..."
     - docker build -f deploy/Dockerfile.api -t $API_IMAGE:$CI_COMMIT_SHORT_SHA .
     - docker build -f deploy/Dockerfile.worker -t $WORKER_IMAGE:$CI_COMMIT_SHORT_SHA .
-    - echo "Проверка статуса Minikube..."
-    - minikube status || minikube start
+    - echo "Проверка и запуск Minikube..."
+    - minikube status || minikube start --driver=docker --memory=4096 --cpus=2 || (minikube delete --all && minikube start --driver=docker --memory=4096 --cpus=2)
     - echo "Загрузка образов в Minikube..."
     - minikube image load $API_IMAGE:$CI_COMMIT_SHORT_SHA
     - minikube image load $WORKER_IMAGE:$CI_COMMIT_SHORT_SHA
