@@ -13,7 +13,10 @@ unit-tests:
   stage: test
   script:
     - echo "Запуск тестов и проверок кода..."
+    # Создаем .venv, если папки еще нет в директории раннера
+    - if [ ! -d ".venv" ]; then python3 -m venv .venv; fi
     - source .venv/bin/activate
+    - pip install --upgrade pip
     - pip install -r requirements.txt
     - pytest tests/
   rules:

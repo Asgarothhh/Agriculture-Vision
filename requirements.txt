@@ -36,9 +36,21 @@ Pillow>=10.2.0
 numpy>=1.26.0
 opencv-python-headless>=4.9.0
 
-# Rate limit / email
+# ML / Computer Vision
+torch>=2.2.0
+torchvision>=0.17.0
+ultralytics>=8.1.0
+transformers>=4.38.0
+PyYAML>=6.0.1
+
+# MLOps / Tracking / DVC
+mlflow>=2.11.0
+dvc[s3]>=3.48.0
+
+# Rate limit / email / monitoring
 slowapi>=0.1.9
 aiosmtplib>=3.0.0
+prometheus-fastapi-instrumentator>=7.0.0
 
 # Tests
 pytest>=8.0.0
