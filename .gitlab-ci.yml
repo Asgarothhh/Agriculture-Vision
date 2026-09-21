@@ -16,12 +16,11 @@ unit-tests:
     - cp $ENV_FILE .env
     - export $(grep -v '^#' .env | xargs)
 
-    - echo "Запуск временной базы данных PostgreSQL через Docker..."
-    # Удаляем зависший контейнер, если прошлый пайплайн упал
-    - docker rm -f test-postgres || true
-    # Запускаем чистую БД. Она автоматически создаст базу из переменной POSTGRES_DB
+    - echo "Запуск тестовых контейнеров (PostgreSQL/PostGIS + Redis)..."
+    - docker rm -f test-postgres test-redis || true
     - docker run -d --name test-postgres -p 5432:5432 -e POSTGRES_USER=${POSTGRES_USER:-developer} -e POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-CHANGE_ME} -e POSTGRES_DB=${POSTGRES_DB:-agriculture-vision} postgis/postgis:15-3.4
-    - echo "Ожидание инициализации PostgreSQL..."
+    - docker run -d --name test-redis -p 6379:6379 redis:7-alpine
+    - echo "Ожидание инициализации сервисов..."
     - sleep 5
 
     - echo "Подготовка Python-окружения..."
@@ -36,9 +35,8 @@ unit-tests:
     - pytest tests/
 
   after_script:
-    # Блок after_script выполнится в любом случае, даже если тесты упадут
-    - echo "Остановка и удаление тестовой базы данных..."
-    - docker rm -f test-postgres || true
+    - echo "Остановка и удаление тестовых контейнеров..."
+    - docker rm -f test-postgres test-redis || true
 
   rules:
     - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
