@@ -5,49 +5,64 @@ stages:
 
 variables:
   KUBE_NAMESPACE: "ml-service"
-  IMAGE_TAG: "$CI_REGISTRY_IMAGE:$CI_COMMIT_SHA"
+  API_IMAGE: "agriculture-vision-api"
+  WORKER_IMAGE: "agriculture-vision-worker"
 
 # --- СТАДИЯ TEST ---
-run-tests:
+unit-tests:
   stage: test
   script:
-    - echo "Запуск юнит-тестов и проверки стиля кода..."
+    - echo "Запуск тестов и проверок кода..."
+    - source .venv/bin/activate
+    - pip install -r requirements.txt
+    - pytest tests/
   rules:
     - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
     - if: '$CI_COMMIT_BRANCH'
 
 # --- СТАДИЯ BUILD ---
-build-docker-image:
+build-images:
   stage: build
   script:
-    - echo "Авторизация в GitLab Container Registry..."
-    - docker login -u "$CI_REGISTRY_USER" -p "$CI_REGISTRY_PASSWORD" "$CI_REGISTRY"
-    - echo "Сборка Docker-образа..."
-    - docker build -t "$IMAGE_TAG" -t "$CI_REGISTRY_IMAGE:latest" .
-    - echo "Публикация образа в реестр..."
-    - docker push "$IMAGE_TAG"
-    - docker push "$CI_REGISTRY_IMAGE:latest"
+    - echo "Сборка Docker-образов API и Worker..."
+    - docker build -f deploy/Dockerfile.api -t $API_IMAGE:$CI_COMMIT_SHORT_SHA .
+    - docker build -f deploy/Dockerfile.worker -t $WORKER_IMAGE:$CI_COMMIT_SHORT_SHA .
+    - echo "Загрузка образов в Minikube..."
+    - minikube image load $API_IMAGE:$CI_COMMIT_SHORT_SHA
+    - minikube image load $WORKER_IMAGE:$CI_COMMIT_SHORT_SHA
   rules:
     - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
       changes:
-        - "src/**/*"
-        - "Dockerfile"
+        - "app/**/*"
+        - "models/**/*"
+        - "deploy/**/*"
         - "requirements.txt"
     - if: '$CI_COMMIT_BRANCH'
       changes:
-        - "src/**/*"
-        - "Dockerfile"
+        - "app/**/*"
+        - "models/**/*"
+        - "deploy/**/*"
         - "requirements.txt"
 
 # --- СТАДИЯ DEPLOY ---
-deploy-to-k8s:
+deploy-k8s:
   stage: deploy
   script:
-    - echo "Подстановка актуального образа в манифест..."
-    - sed -i "s|IMAGE_PLACEHOLDER|$IMAGE_TAG|g" k8s/deployment.yaml
-    - echo "Применение манифестов в неймспейс $KUBE_NAMESPACE..."
+    - echo "Применение конфигураций в неймспейс $KUBE_NAMESPACE..."
     - kubectl apply -f k8s/namespace-and-quota.yaml
     - kubectl apply -f k8s/limit-range.yaml
-    - kubectl apply -f k8s/deployment.yaml
+    - kubectl apply -f k8s/configmap.yaml
+
+    - echo "Подстановка актуальных образов в манифесты..."
+    - sed -i "s|API_IMAGE_PLACEHOLDER|$API_IMAGE:$CI_COMMIT_SHORT_SHA|g" k8s/api-deployment.yaml
+    - sed -i "s|WORKER_IMAGE_PLACEHOLDER|$WORKER_IMAGE:$CI_COMMIT_SHORT_SHA|g" k8s/worker-deployment.yaml
+
+    - echo "Применение деплойментов..."
+    - kubectl apply -f k8s/api-deployment.yaml
+    - kubectl apply -f k8s/worker-deployment.yaml
+
+    - echo "Проверка статуса обновления..."
+    - kubectl rollout status deployment/agriculture-vision-api -n $KUBE_NAMESPACE --timeout=120s
+    - kubectl rollout status deployment/agriculture-vision-worker -n $KUBE_NAMESPACE --timeout=120s
   rules:
     - if: '$CI_COMMIT_BRANCH == "main"'

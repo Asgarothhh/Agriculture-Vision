@@ -80,3 +80,4 @@ helm install airflow apache-airflow/airflow \
 
 # Проброс порта (открыть http://localhost:8080, логин/пароль: admin/admin)
 kubectl port-forward svc/airflow-webserver 8080:8080 -n airflowagro
+

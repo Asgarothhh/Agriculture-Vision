@@ -1,0 +1,12 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: agri-config
+  namespace: ml-service
+data:
+  MLFLOW_TRACKING_URI: "http://localhost:5000"
+  S3_ENDPOINT_URL: "http://localhost:9000"
+  S3_BUCKET_DVC: "agri-dvc-storage"
+  S3_BUCKET_ARTIFACTS: "agri-mlflow-artifacts"
+  CELERY_BROKER_URL: "redis://redis-service.ml-service.svc.cluster.local:6379/0"
+  DATABASE_URL: "postgresql+asyncpg://postgres:postgres@postgres-service.ml-service.svc.cluster.local:5432/agri_db"

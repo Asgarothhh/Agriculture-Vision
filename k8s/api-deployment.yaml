@@ -4,26 +4,29 @@ metadata:
   name: agriculture-vision-api
   namespace: ml-service
   labels:
-    app: agriculture-vision
+    app: agri-api
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: agriculture-vision
+      app: agri-api
   template:
     metadata:
       labels:
-        app: agriculture-vision
+        app: agri-api
     spec:
       containers:
-        - name: fastapi-ml-container
-          image: IMAGE_PLACEHOLDER
+        - name: fastapi-api
+          image: API_IMAGE_PLACEHOLDER
           imagePullPolicy: Always
           ports:
             - containerPort: 8000
+          envFrom:
+            - configMapRef:
+                name: agri-config
           resources:
             requests:
-              cpu: "200m"
+              cpu: "300m"
               memory: "512Mi"
             limits:
               cpu: "1000m"
@@ -45,3 +48,17 @@ spec:
             timeoutSeconds: 5
             successThreshold: 1
             failureThreshold: 3
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: agri-api-service
+  namespace: ml-service
+spec:
+  type: ClusterIP
+  ports:
+    - port: 8000
+      targetPort: 8000
+      name: http
+  selector:
+    app: agri-api
