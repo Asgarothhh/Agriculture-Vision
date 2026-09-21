@@ -12,12 +12,45 @@ variables:
 unit-tests:
   stage: test
   script:
-    - echo "Запуск тестов и проверок кода..."
-    # Создаем .venv, если папки еще нет в директории раннера
+    - echo "Применение конфигурации из файловой переменной..."
+    - cp $ENV_FILE .env
+    - export $(grep -v '^#' .env | xargs)
+
+    - echo "Подготовка Python-окружения..."
+    - export GDAL_VERSION=$(gdal-config --version)
     - if [ ! -d ".venv" ]; then python3 -m venv .venv; fi
     - source .venv/bin/activate
     - pip install --upgrade pip
     - pip install -r requirements.txt
+
+    - echo "Проверка и автоматическое создание базы данных..."
+    - |
+      python3 -c "
+      import psycopg2, os
+
+      host = os.getenv('POSTGRES_HOST', 'localhost')
+      user = os.getenv('POSTGRES_USER', 'developer')
+      password = os.getenv('POSTGRES_PASSWORD', '')
+      db_name = os.getenv('POSTGRES_DB', 'agriculture-vision')
+
+      conn = psycopg2.connect(dbname='postgres', user=user, password=password, host=host, port=5432)
+      conn.autocommit = True
+      cur = conn.cursor()
+
+      cur.execute(f\"SELECT 1 FROM pg_database WHERE datname = '{db_name}';\")
+      if not cur.fetchone():
+          print(f'База данных {db_name} не найдена. Создание...')
+          cur.execute(f'CREATE DATABASE \"{db_name}\";')
+          print('База данных создана!')
+      else:
+          print(f'База данных {db_name} уже существует.')
+
+      cur.close()
+      conn.close()
+      "
+
+    - echo "Применение миграций Alembic и запуск автотестов..."
+    - alembic upgrade head
     - pytest tests/
   rules:
     - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
