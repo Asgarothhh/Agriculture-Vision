@@ -18,7 +18,7 @@ spec:
       containers:
         - name: fastapi-api
           image: API_IMAGE_PLACEHOLDER
-          imagePullPolicy: Always
+          imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 8000
           envFrom:

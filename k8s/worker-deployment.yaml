@@ -18,7 +18,7 @@ spec:
       containers:
         - name: celery-worker
           image: WORKER_IMAGE_PLACEHOLDER
-          imagePullPolicy: Always
+          imagePullPolicy: IfNotPresent
           envFrom:
             - configMapRef:
                 name: agri-config
