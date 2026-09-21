@@ -12,9 +12,17 @@ variables:
 unit-tests:
   stage: test
   script:
-    - echo "Применение конфигурации из файловой переменной..."
+    - echo "Применение конфигурации из переменной ENV_FILE..."
     - cp $ENV_FILE .env
     - export $(grep -v '^#' .env | xargs)
+
+    - echo "Запуск временной базы данных PostgreSQL через Docker..."
+    # Удаляем зависший контейнер, если прошлый пайплайн упал
+    - docker rm -f test-postgres || true
+    # Запускаем чистую БД. Она автоматически создаст базу из переменной POSTGRES_DB
+    - docker run -d --name test-postgres -p 5432:5432 -e POSTGRES_USER=${POSTGRES_USER:-developer} -e POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-CHANGE_ME} -e POSTGRES_DB=${POSTGRES_DB:-agriculture-vision} postgres:15
+    - echo "Ожидание инициализации PostgreSQL..."
+    - sleep 5
 
     - echo "Подготовка Python-окружения..."
     - export GDAL_VERSION=$(gdal-config --version)
@@ -23,35 +31,15 @@ unit-tests:
     - pip install --upgrade pip
     - pip install -r requirements.txt
 
-    - echo "Проверка и автоматическое создание базы данных..."
-    - |
-      python3 -c "
-      import psycopg2, os
-
-      host = os.getenv('POSTGRES_HOST', 'localhost')
-      user = os.getenv('POSTGRES_USER', 'developer')
-      password = os.getenv('POSTGRES_PASSWORD', '')
-      db_name = os.getenv('POSTGRES_DB', 'agriculture-vision')
-
-      conn = psycopg2.connect(dbname='postgres', user=user, password=password, host=host, port=5432)
-      conn.autocommit = True
-      cur = conn.cursor()
-
-      cur.execute(f\"SELECT 1 FROM pg_database WHERE datname = '{db_name}';\")
-      if not cur.fetchone():
-          print(f'База данных {db_name} не найдена. Создание...')
-          cur.execute(f'CREATE DATABASE \"{db_name}\";')
-          print('База данных создана!')
-      else:
-          print(f'База данных {db_name} уже существует.')
-
-      cur.close()
-      conn.close()
-      "
-
     - echo "Применение миграций Alembic и запуск автотестов..."
     - alembic upgrade head
     - pytest tests/
+
+  after_script:
+    # Блок after_script выполнится в любом случае, даже если тесты упадут
+    - echo "Остановка и удаление тестовой базы данных..."
+    - docker rm -f test-postgres || true
+
   rules:
     - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
     - if: '$CI_COMMIT_BRANCH'
