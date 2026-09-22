@@ -72,25 +72,26 @@ build-images:
         - "deploy/**/*"
         - "requirements.txt"
 
-# --- СТАДИЯ DEPLOY ---
 deploy-k8s:
   stage: deploy
   script:
-    - echo "Применение конфигураций в неймспейс $KUBE_NAMESPACE..."
-    - kubectl apply -f k8s/namespace-and-quota.yaml
-    - kubectl apply -f k8s/limit-range.yaml
     - kubectl apply -f k8s/configmap.yaml
+    - kubectl apply -f k8s/postgres.yaml
+    - kubectl apply -f k8s/redis.yaml
 
-    - echo "Подстановка актуальных образов в манифесты..."
+    - echo "Ожидание готовности PostgreSQL..."
+    - kubectl rollout status deployment/postgres-deployment -n $KUBE_NAMESPACE --timeout=60s
+
+    - echo "Подстановка образов и деплой API/Worker..."
     - sed -i "s|API_IMAGE_PLACEHOLDER|$API_IMAGE:$CI_COMMIT_SHORT_SHA|g" k8s/api-deployment.yaml
     - sed -i "s|WORKER_IMAGE_PLACEHOLDER|$WORKER_IMAGE:$CI_COMMIT_SHORT_SHA|g" k8s/worker-deployment.yaml
-
-    - echo "Применение деплойментов..."
     - kubectl apply -f k8s/api-deployment.yaml
     - kubectl apply -f k8s/worker-deployment.yaml
-    - echo "Применение миграций Alembic в базе данных..."
+
+    - echo "Применение миграций Alembic..."
     - kubectl exec -n $KUBE_NAMESPACE deployment/agriculture-vision-api -- alembic upgrade head
-    - echo "Проверка статуса обновления..."
+
+    - echo "Проверка завершения раскатки..."
     - kubectl rollout status deployment/agriculture-vision-api -n $KUBE_NAMESPACE --timeout=120s
     - kubectl rollout status deployment/agriculture-vision-worker -n $KUBE_NAMESPACE --timeout=120s
   rules:
