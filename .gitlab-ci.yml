@@ -88,7 +88,8 @@ deploy-k8s:
     - echo "Применение деплойментов..."
     - kubectl apply -f k8s/api-deployment.yaml
     - kubectl apply -f k8s/worker-deployment.yaml
-
+    - echo "Применение миграций Alembic в базе данных..."
+    - kubectl exec -n $KUBE_NAMESPACE deployment/agriculture-vision-api -- alembic upgrade head
     - echo "Проверка статуса обновления..."
     - kubectl rollout status deployment/agriculture-vision-api -n $KUBE_NAMESPACE --timeout=120s
     - kubectl rollout status deployment/agriculture-vision-worker -n $KUBE_NAMESPACE --timeout=120s
