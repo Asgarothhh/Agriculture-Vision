@@ -28,12 +28,12 @@ spec:
           readinessProbe:
             exec:
               command: ["pg_isready", "-U", "developer", "-d", "agriculture-vision"]
-            initialDelaySeconds: 5
+            initialDelaySeconds: 15
             periodSeconds: 5
           livenessProbe:
             exec:
               command: ["pg_isready", "-U", "developer", "-d", "agriculture-vision"]
-            initialDelaySeconds: 10
+            initialDelaySeconds: 45
             periodSeconds: 10
 ---
 apiVersion: v1
