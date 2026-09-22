@@ -88,12 +88,13 @@ deploy-k8s:
     - kubectl apply -f k8s/api-deployment.yaml
     - kubectl apply -f k8s/worker-deployment.yaml
 
+    - echo "Применение миграций Alembic..."
+    - sleep 5
+    - kubectl exec -n $KUBE_NAMESPACE deployment/agriculture-vision-api -- alembic upgrade head
+
     - echo "Проверка завершения раскатки..."
     - kubectl rollout status deployment/agriculture-vision-api -n $KUBE_NAMESPACE --timeout=120s
     - kubectl rollout status deployment/agriculture-vision-worker -n $KUBE_NAMESPACE --timeout=120s
-
-    - echo "Применение миграций Alembic..."
-    - kubectl exec -n $KUBE_NAMESPACE deployment/agriculture-vision-api -- alembic upgrade head
   rules:
     - if: '$CI_COMMIT_BRANCH == "dev"'
     - if: '$CI_COMMIT_BRANCH == "main"'
