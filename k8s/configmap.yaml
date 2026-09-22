@@ -4,9 +4,16 @@ metadata:
   name: agri-config
   namespace: ml-service
 data:
-  MLFLOW_TRACKING_URI: "http://mlflow-service.ml-service.svc.cluster.local:5000"
-  S3_ENDPOINT_URL: "http://minio-service.ml-service.svc.cluster.local:9000"
-  S3_BUCKET_DVC: "agri-dvc-storage"
-  S3_BUCKET_ARTIFACTS: "agri-mlflow-artifacts"
-  CELERY_BROKER_URL: "redis://redis-service.ml-service.svc.cluster.local:6379/0"
-  DATABASE_URL: "postgresql+asyncpg://postgres:postgres@postgres-service.ml-service.svc.cluster.local:5432/agri_db"
+  POSTGRES_HOST: "host.minikube.internal"
+  POSTGRES_PORT: "5432"
+  POSTGRES_DB: "agriculture-vision"
+  POSTGRES_USER: "developer"
+  POSTGRES_PASSWORD: "developer"
+  DATABASE_URL: "postgresql+asyncpg://developer:developer@host.minikube.internal:5432/agriculture-vision"
+  DATABASE_SYNC_URL: "postgresql://developer:developer@host.minikube.internal:5432/agriculture-vision"
+  REDIS_URL: "redis://host.minikube.internal:6379/0"
+  CELERY_BROKER_URL: "redis://host.minikube.internal:6379/0"
+  S3_ENDPOINT_URL: "http://host.minikube.internal:9000"
+  S3_BUCKET: "agrovision"
+  S3_ACCESS_KEY: "minioadmin"
+  S3_SECRET_KEY: "minioadmin"
