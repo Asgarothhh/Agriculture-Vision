@@ -27,9 +27,14 @@ spec:
             - containerPort: 5432
           readinessProbe:
             exec:
-              command: [ "pg_isready", "-U", "developer", "-d", "agriculture-vision" ]
-            initialDelaySeconds: 3
+              command: ["pg_isready", "-U", "developer", "-d", "agriculture-vision"]
+            initialDelaySeconds: 5
             periodSeconds: 5
+          livenessProbe:
+            exec:
+              command: ["pg_isready", "-U", "developer", "-d", "agriculture-vision"]
+            initialDelaySeconds: 10
+            periodSeconds: 10
 ---
 apiVersion: v1
 kind: Service
