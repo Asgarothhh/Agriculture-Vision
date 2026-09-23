@@ -25,9 +25,16 @@ async def create_task(
     model: str = Form("segformer"),
     confidence: float = Form(0.5),
     aoi: str | None = Form(None),
+    geo_bounds: str | None = Form(None),
 ):
     aoi_obj = json.loads(aoi) if aoi else None
-    task = await service.create_task(db, current, file, model, confidence, aoi_obj)
+    try:
+        bounds_obj = json.loads(geo_bounds) if geo_bounds else None
+    except json.JSONDecodeError as exc:
+        from fastapi import HTTPException
+
+        raise HTTPException(400, "geo_bounds must be JSON") from exc
+    task = await service.create_task(db, current, file, model, confidence, aoi_obj, bounds_obj)
     return {"task_id": task.id, **service.task_to_dict(task)}
 
 

@@ -16,9 +16,16 @@ spec/
 
 .env
 *.egg-info/
+node_modules/
 dist/
-build/
+frontend/test-results/
+frontend/playwright-report/
+frontend/blob-report/
+frontend/playwright/.cache/
 
+config/*.pt
+config/*.pth
+config/segformer_best/
 
 app/segmentation_service/weights/*.pth
 !app/segmentation_service/weights/.gitkeep

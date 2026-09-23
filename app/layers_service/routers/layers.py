@@ -54,6 +54,15 @@ async def delete_layer(
     return {"detail": "ok"}
 
 
+@router.get("/{layer_id}/objects")
+async def list_objects(
+    layer_id: UUID,
+    current: Annotated[User, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    return await service.list_layer_objects(db, current, layer_id)
+
+
 @router.post("/{layer_id}/objects")
 async def add_object(
     layer_id: UUID,

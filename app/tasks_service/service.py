@@ -27,6 +27,21 @@ ALLOWED_EXT = {".tif", ".tiff", ".png", ".jpg", ".jpeg"}
 ALLOWED_MODELS = {"yolo_seg_26", "segformer"}
 
 
+def gdal_transform_from_bounds(bounds: dict[str, Any], width: int, height: int) -> list[float]:
+    try:
+        west = float(bounds["west"])
+        south = float(bounds["south"])
+        east = float(bounds["east"])
+        north = float(bounds["north"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, detail="geo_bounds: west,south,east,north") from exc
+    if width <= 0 or height <= 0:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, detail="Некорректный размер снимка")
+    pixel_width = (east - west) / width
+    pixel_height = (south - north) / height
+    return [west, pixel_width, 0.0, north, 0.0, pixel_height]
+
+
 def _utcnow() -> datetime:
     return datetime.now(UTC)
 
@@ -86,6 +101,7 @@ async def create_task(
     model: str,
     confidence: float,
     aoi: dict[str, Any] | None,
+    geo_bounds: dict[str, Any] | None = None,
 ) -> ProcessingTask:
     settings = get_settings()
     filename = upload.filename or "image.tif"
@@ -98,6 +114,16 @@ async def create_task(
     if len(data) > settings.max_upload_bytes:
         raise HTTPException(status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail="Файл слишком большой")
     meta = _read_raster_meta(data, filename)
+    pixel_space = bool(meta.get("transform"))
+    if geo_bounds:
+        transform = gdal_transform_from_bounds(geo_bounds, meta["width"], meta["height"])
+        meta["transform"] = transform
+        meta["crs"] = "EPSG:4326"
+        meta["coverage_area"] = abs(
+            (float(geo_bounds["east"]) - float(geo_bounds["west"]))
+            * (float(geo_bounds["north"]) - float(geo_bounds["south"]))
+        )
+        pixel_space = True
 
     aoi_elem = None
     if aoi:
@@ -145,7 +171,7 @@ async def create_task(
         celery_app.send_task(
             "app.tasks_service.workers.run_inference",
             args=[str(task.id), meta.get("transform")],
-            kwargs={"pixel_space": bool(meta.get("transform"))},
+            kwargs={"pixel_space": pixel_space},
         )
     except Exception as exc:
         task.status = "FAILED"

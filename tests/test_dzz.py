@@ -7,6 +7,14 @@ def test_tile_url_templates_include_both_orders():
     assert any("/8/85/140" in url for url in urls)
 
 
+def test_image_server_tile_urls_prefer_arcgis_order():
+    root = "https://www.dzz.by/arcgis/rest/services/georesursDDZ/Polya_all/ImageServer"
+    urls = _tile_urls(root, 12, 2360, 1180)
+    assert f"{root}/tile/12/1180/2360" in urls
+    assert f"{root}/tile/12/2360/1180" in urls
+    assert urls[0].endswith("/tile/12/1180/2360")
+
+
 def test_transparent_png_signature():
     assert TRANSPARENT_PNG.startswith(b"\x89PNG")
 

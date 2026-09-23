@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import uuid
 
+import pytest
 from sqlalchemy import func, select
 
 from app.core.seed import DEMO_PASSWORD
@@ -254,6 +255,12 @@ def test_task_infer_writes_geometry_and_to_layers(client, demo_headers, db_sessi
     ) or 0
     assert auto_after > auto_before
 
+    listed = client.get("/api/v1/layers/", headers=demo_headers)
+    crop_layer = next(item for item in listed.json() if item.get("class_id") == 2)
+    objects = client.get(f"/api/v1/layers/{crop_layer['id']}/objects", headers=demo_headers)
+    assert objects.status_code == 200
+    assert objects.json()
+
     opened = client.get(f"/api/v1/activity/{task_id}/open", headers=demo_headers)
     assert opened.status_code == 200
     downloaded = client.get(f"/api/v1/activity/{task_id}/result", headers=demo_headers)
@@ -261,6 +268,52 @@ def test_task_infer_writes_geometry_and_to_layers(client, demo_headers, db_sessi
 
     blocked = client.delete(f"/api/v1/tasks/{task_id}", headers=demo_headers)
     assert blocked.status_code == 409
+
+
+def test_geo_bounds_georeferences_pixels(client, demo_headers, db_session, monkeypatch):
+    from app.ml_service.schemas import InferenceFeature, InferenceResponse
+
+    def pixel_infer(*_args, **_kwargs) -> InferenceResponse:
+        ring = [[[0, 0], [8, 0], [8, 8], [0, 8], [0, 0]]]
+        return InferenceResponse(
+            model="segformer",
+            polygons=[
+                InferenceFeature(
+                    class_id=2,
+                    confidence=0.9,
+                    geometry={"type": "Polygon", "coordinates": ring},
+                )
+            ],
+            points=[],
+        )
+
+    _patch_eager_infer(monkeypatch, infer=pixel_infer)
+    bounds = {"west": 27.0, "south": 53.0, "east": 27.8, "north": 53.8}
+    created = client.post(
+        "/api/v1/tasks/",
+        headers=demo_headers,
+        files={"file": ("aoi.png", tiny_png(), "image/png")},
+        data={
+            "model": "segformer",
+            "confidence": "0.5",
+            "geo_bounds": json.dumps(bounds),
+        },
+    )
+    assert created.status_code == 200, created.text
+    task_id = uuid.UUID(str(created.json()["task_id"]))
+    db_session.expire_all()
+    image = db_session.scalar(select(Image).where(Image.task_id == task_id))
+    assert image is not None
+    poly = db_session.scalar(select(PolygonObject).where(PolygonObject.image_id == image.id))
+    assert poly is not None
+    from geoalchemy2.shape import to_shape
+
+    geom = to_shape(poly.geom)
+    xs, ys = geom.exterior.xy
+    assert min(xs) == pytest.approx(27.0, abs=0.05)
+    assert max(xs) == pytest.approx(27.8, abs=0.05)
+    assert min(ys) == pytest.approx(53.0, abs=0.05)
+    assert max(ys) == pytest.approx(53.8, abs=0.05)
 
 
 def test_delete_pending_or_failed_task(client, demo_headers, db_session, monkeypatch):

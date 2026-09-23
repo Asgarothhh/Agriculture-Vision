@@ -42,3 +42,6 @@ packages = [
 asyncio_mode = "auto"
 testpaths = ["tests"]
 filterwarnings = ["ignore::DeprecationWarning"]
+markers = [
+    "ml: live model weight loading (GPU/CPU, skipped in CI without files)",
+]

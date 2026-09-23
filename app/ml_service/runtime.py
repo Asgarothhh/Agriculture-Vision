@@ -37,6 +37,12 @@ class ModelRuntime:
             path = Path(raw)
             if not path.is_absolute():
                 path = ROOT / path
+            if path.is_dir():
+                logger.warning(
+                    "Skipping directory %s — pack with: python scripts/pack_segformer_weights.py",
+                    path,
+                )
+                continue
             if path.is_file() and path.stat().st_size > 0:
                 return path
         return None
@@ -50,6 +56,7 @@ class ModelRuntime:
         seg_path = self._resolve(
             settings.segformer_weights_path,
             "config/segformer_best.pt",
+            "config/segformer_best/best_iou",
             "app/segmentation_service/weights/best_iou.pth",
         )
         if yolo_path is not None:
@@ -70,8 +77,12 @@ class ModelRuntime:
         if seg_path is not None:
             self._paths["segformer"] = str(seg_path)
             try:
-                from segmentation_service.runtime import SegmentationRuntime
-                from segmentation_service.settings import load_settings as load_seg_settings
+                try:
+                    from segmentation_service.runtime import SegmentationRuntime
+                    from segmentation_service.settings import load_settings as load_seg_settings
+                except ModuleNotFoundError:
+                    from app.segmentation_service.runtime import SegmentationRuntime
+                    from app.segmentation_service.settings import load_settings as load_seg_settings
 
                 seg_settings = load_seg_settings()
                 seg_settings.checkpoint_path = seg_path
@@ -85,7 +96,14 @@ class ModelRuntime:
                 self._loaded["segformer"] = False
                 self._errors["segformer"] = str(exc)
         else:
-            self._errors["segformer"] = "weights file not found"
+            unpacked = ROOT / "config" / "segformer_best" / "best_iou"
+            if unpacked.is_dir():
+                self._errors["segformer"] = (
+                    "weights file not found; unpacked checkpoint at "
+                    "config/segformer_best/best_iou — run: python scripts/pack_segformer_weights.py"
+                )
+            else:
+                self._errors["segformer"] = "weights file not found"
         return self.health()
 
     def health(self) -> dict[str, Any]:
