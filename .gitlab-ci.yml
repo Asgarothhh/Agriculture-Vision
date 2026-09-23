@@ -1,0 +1,100 @@
+stages:
+  - test
+  - build
+  - deploy
+
+variables:
+  KUBE_NAMESPACE: "ml-service"
+  API_IMAGE: "agriculture-vision-api"
+  WORKER_IMAGE: "agriculture-vision-worker"
+
+# --- СТАДИЯ TEST ---
+unit-tests:
+  stage: test
+  script:
+    - echo "Применение конфигурации из переменной ENV_FILE..."
+    - cp $ENV_FILE .env
+    - export $(grep -v '^#' .env | xargs)
+
+    - echo "Запуск тестовых контейнеров (PostgreSQL/PostGIS + Redis)..."
+    - docker rm -f test-postgres test-redis || true
+    - docker run -d --name test-postgres -p 5432:5432 -e POSTGRES_USER=${POSTGRES_USER:-developer} -e POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-CHANGE_ME} -e POSTGRES_DB=${POSTGRES_DB:-agriculture-vision} postgis/postgis:15-3.4
+    - docker run -d --name test-redis -p 6379:6379 redis:7-alpine
+    - echo "Ожидание инициализации сервисов..."
+    - sleep 5
+
+    - echo "Подготовка Python-окружения..."
+    - export GDAL_VERSION=$(gdal-config --version)
+    - if [ ! -d ".venv" ]; then python3 -m venv .venv; fi
+    - source .venv/bin/activate
+    - pip install --upgrade pip
+    - pip install -r requirements.txt
+
+    - echo "Применение миграций Alembic и запуск автотестов..."
+    - alembic upgrade head
+    - pytest tests/
+
+  after_script:
+    - echo "Остановка и удаление тестовых контейнеров..."
+    - docker rm -f test-postgres test-redis || true
+
+  rules:
+    - when: never
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH'
+  allow_failure: true
+
+# --- СТАДИЯ BUILD ---
+build-images:
+  stage: build
+  script:
+    - echo "Проверка и запуск Minikube..."
+    - minikube status || minikube start --driver=docker --memory=8192 --cpus=4 || (minikube delete --all && minikube start --driver=docker --memory=8192 --cpus=4)
+
+    - echo "Переключение Docker на демон Minikube..."
+    - eval $(minikube docker-env)
+
+    - echo "Сборка Docker-образов напрямую внутри кластера..."
+    - docker build -f deploy/Dockerfile.api -t $API_IMAGE:$CI_COMMIT_SHORT_SHA .
+    - docker build -f deploy/Dockerfile.worker -t $WORKER_IMAGE:$CI_COMMIT_SHORT_SHA .
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "dev"'
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+      changes:
+        - "app/**/*"
+        - "models/**/*"
+        - "deploy/**/*"
+        - "requirements.txt"
+    - if: '$CI_COMMIT_BRANCH'
+      changes:
+        - "app/**/*"
+        - "models/**/*"
+        - "deploy/**/*"
+        - "requirements.txt"
+
+deploy-k8s:
+  stage: deploy
+  script:
+    - kubectl apply -f k8s/configmap.yaml
+    - kubectl apply -f k8s/postgres.yaml
+    - kubectl apply -f k8s/redis.yaml
+
+    - echo "Ожидание готовности PostgreSQL..."
+    - kubectl rollout status deployment/postgres-deployment -n $KUBE_NAMESPACE --timeout=180s
+
+    - echo "Подстановка образов и деплой API/Worker..."
+    - sed -i "s|API_IMAGE_PLACEHOLDER|$API_IMAGE:$CI_COMMIT_SHORT_SHA|g" k8s/api-deployment.yaml
+    - sed -i "s|WORKER_IMAGE_PLACEHOLDER|$WORKER_IMAGE:$CI_COMMIT_SHORT_SHA|g" k8s/worker-deployment.yaml
+    - kubectl apply -f k8s/api-deployment.yaml
+    - kubectl apply -f k8s/worker-deployment.yaml
+
+    - echo "Применение миграций Alembic..."
+    - sleep 5
+    - kubectl exec -n $KUBE_NAMESPACE deployment/agriculture-vision-api -- alembic upgrade head
+
+    - echo "Проверка завершения раскатки..."
+    - kubectl rollout status deployment/agriculture-vision-api -n $KUBE_NAMESPACE --timeout=120s
+    - kubectl rollout status deployment/agriculture-vision-worker -n $KUBE_NAMESPACE --timeout=120s
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "dev"'
+    - if: '$CI_COMMIT_BRANCH == "main"'
