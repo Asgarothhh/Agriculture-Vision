@@ -77,12 +77,13 @@ deploy-k8s:
   stage: deploy
   script:
     - kubectl apply -f k8s/namespace-and-quota.yaml
+    - kubectl apply -f k8s/limit-range.yaml
     - kubectl apply -f k8s/configmap.yaml
     - kubectl apply -f k8s/postgres.yaml
     - kubectl apply -f k8s/redis.yaml
 
     - echo "Ожидание готовности PostgreSQL..."
-    - kubectl rollout status deployment/postgres-deployment -n $KUBE_NAMESPACE --timeout=180s
+    - kubectl rollout status deployment/postgres-deployment -n $KUBE_NAMESPACE --timeout=600s
 
     - echo "Подстановка образов и деплой API/Worker..."
     - sed -i "s|API_IMAGE_PLACEHOLDER|$API_IMAGE:$CI_COMMIT_SHORT_SHA|g" k8s/api-deployment.yaml
