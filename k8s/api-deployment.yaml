@@ -33,6 +33,12 @@ spec:
             limits:
               cpu: "1000m"
               memory: "3Gi"
+          # --- ДОБАВЛЕНО МОНТИРОВАНИЕ В КОНТЕЙНЕР ---
+          volumeMounts:
+            - name: model-weights
+              mountPath: /app/config
+            - name: model-weights-alt
+              mountPath: /app/app/segmentation_service/weights
           livenessProbe:
             httpGet:
               path: /health
@@ -50,6 +56,16 @@ spec:
             timeoutSeconds: 5
             successThreshold: 1
             failureThreshold: 6
+      # --- ДОБАВЛЕНЫ ОБЪЕМЫ HOSTPATH С СЕРВЕРА ---
+      volumes:
+        - name: model-weights
+          hostPath:
+            path: /var/agriculture-vision/config
+            type: DirectoryOrCreate
+        - name: model-weights-alt
+          hostPath:
+            path: /var/agriculture-vision/config
+            type: DirectoryOrCreate
 ---
 apiVersion: v1
 kind: Service
