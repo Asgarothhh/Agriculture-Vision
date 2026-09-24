@@ -76,6 +76,7 @@ build-images:
 deploy-k8s:
   stage: deploy
   script:
+    - kubectl apply -f k8s/namespace-and-quota.yaml
     - kubectl apply -f k8s/configmap.yaml
     - kubectl apply -f k8s/postgres.yaml
     - kubectl apply -f k8s/redis.yaml
