@@ -1,11 +1,11 @@
-# АгроВижион — backend
+# АгроВижион
 
-Асинхронный REST API (`/api/v1`) для распознавания сельхозугодий. Модели сегментации загружаются **из файлов весов** в процессе API/Celery, отдельного ML-сервера нет.
+Веб-приложение и REST API (`/api/v1`) для распознавания сельхозугодий. Модели сегментации загружаются **из файлов весов** в процессе API/Celery, отдельного ML-сервера нет.
 
 Спецификация: [`spec/spec_backend.md`](spec/spec_backend.md).  
-Локальный инференс и раскладка репозитория: [`spec/spec_backend_local_ml.md`](spec/spec_backend_local_ml.md).
+Локальный инференс: [`spec/spec_backend_local_ml.md`](spec/spec_backend_local_ml.md).
 
-## Быстрый старт
+## Быстрый старт (локально)
 
 ```bash
 python -m venv .venv && source .venv/bin/activate
@@ -16,12 +16,24 @@ cp .env.example .env
 
 alembic upgrade head
 python -m app.core.seed
-
-uvicorn app.main:app --reload --port 8000
-# другой терминал:
-celery -A app.tasks_service.workers worker -Q ml-gpu,cpu -l info
 ```
 
+Веса: `config/yolo_best.pt`, `config/segformer_best.pt` (или `YOLO_WEIGHTS_PATH` / `SEGFORMER_WEIGHTS_PATH`).
+Если SegFormer распакован в `config/segformer_best/best_iou/`:
+
+```bash
+python scripts/pack_segformer_weights.py
+```
+
+Три терминала:
+
+```bash
+uvicorn app.main:app --reload --port 8000
+celery -A app.tasks_service.workers worker -Q ml-gpu,cpu -l info
+cd frontend && npm install && npm run dev
+```
+
+UI: [http://localhost:5173](http://localhost:5173) (Vite проксирует `/api` на `:8000`).  
 Swagger: [http://localhost:8000/api/v1/docs](http://localhost:8000/api/v1/docs).  
 Авторизация: `Authorization: Bearer <access_token>`.
 
@@ -33,14 +45,25 @@ Swagger: [http://localhost:8000/api/v1/docs](http://localhost:8000/api/v1/docs).
 | `agronom@agrovision.dev` | Агроном |
 | `operator@agrovision.dev` | Оператор |
 
-В DBeaver подключайтесь к **тому же порту, что в `.env`** (локальный PostGIS-контейнер — **5433**, не системный `:5432` без PostGIS). После seed у агронома видны папка «Сезон 2026», слой «Демо поле», задачи PENDING/FAILED/COMPLETED.
-
-Веса: `config/yolo_best.pt`, `config/segformer_best.pt` (или пути `YOLO_WEIGHTS_PATH` / `SEGFORMER_WEIGHTS_PATH`).
+В DBeaver подключайтесь к **тому же порту, что в `.env`** (локальный PostGIS-контейнер — **5433**, не системный `:5432` без PostGIS).
 
 ```bash
 pytest -q
+cd frontend && npm test
 ```
 
-Docker Compose: `docker compose -f deploy/docker-compose.yml up -d --build`.
+Playwright (нужны API на `:8000` и `npm run dev`):
 
-Не-backend артефакты (QGIS, ноутбуки, Express) — в [`extras/`](extras/).
+```bash
+cd frontend && npx playwright install chromium && npm run test:e2e
+```
+
+Маркер `@pytest.mark.ml` — живая загрузка весов; в CI без GPU/файлов тесты весов пропускаются.
+
+## Docker Compose
+
+Один вход: [http://localhost](http://localhost) (Nginx отдаёт `frontend/dist` и проксирует `/api/`).
+
+```bash
+docker compose -f deploy/docker-compose.yml up -d --build
+```

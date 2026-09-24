@@ -169,6 +169,18 @@ async def move_folder_item(db: AsyncSession, user: User, folder_id: UUID, data: 
     return {"detail": "ok"}
 
 
+async def list_layer_objects(db: AsyncSession, user: User, layer_id: UUID) -> list[dict[str, Any]]:
+    layer = await get_owned_layer(db, user, layer_id)
+    rows = (
+        await db.execute(
+            select(LayerObject)
+            .where(LayerObject.layer_id == layer.id)
+            .order_by(LayerObject.number.asc(), LayerObject.created_at.asc())
+        )
+    ).scalars().all()
+    return [await object_payload(db, obj) for obj in rows]
+
+
 async def add_object(db: AsyncSession, user: User, layer_id: UUID, data: ObjectCreate) -> dict[str, Any]:
     layer = await get_owned_layer(db, user, layer_id)
     shapely_geom = geojson_to_shape(data.geom)

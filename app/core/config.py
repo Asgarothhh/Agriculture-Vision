@@ -54,7 +54,9 @@ class Settings(BaseSettings):
     smtp_password: str = ""
     mail_from: str = "noreply@agrovision.local"
 
-    dzz_default_url: str = "https://dzz.by"
+    dzz_default_url: str = (
+        "https://www.dzz.by/arcgis/rest/services/georesursDDZ/Polya_all/ImageServer"
+    )
 
     @field_validator("database_url")
     @classmethod

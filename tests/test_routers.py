@@ -100,6 +100,11 @@ def test_layers_folders_objects_merge(client, auth_headers):
     assert obj2.status_code == 200, obj2.text
     got = client.get(f"/api/v1/objects/{obj1.json()['id']}", headers=auth_headers)
     assert got.status_code == 200
+    listed_objects = client.get(f"/api/v1/layers/{layer_id}/objects", headers=auth_headers)
+    assert listed_objects.status_code == 200, listed_objects.text
+    ids = {item["id"] for item in listed_objects.json()}
+    assert obj1.json()["id"] in ids
+    assert obj2.json()["id"] in ids
 
     merged = client.post(
         "/api/v1/objects/merge",

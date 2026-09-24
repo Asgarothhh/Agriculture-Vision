@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
@@ -123,15 +124,49 @@ def _auth_tuple(row: DzzConnection) -> tuple[str, str]:
     return decrypt_secret(row.login_encrypted), decrypt_secret(row.password_encrypted)
 
 
+IMAGE_SERVER_ROOT_RE = re.compile(
+    r"(https?://[^/]+/arcgis/rest/services/[^/]+/[^/]+/ImageServer)",
+    re.IGNORECASE,
+)
+
+
+def _image_server_root(url: str) -> str | None:
+    match = IMAGE_SERVER_ROOT_RE.search(url or "")
+    if match:
+        return match.group(1).rstrip("/")
+    stripped = (url or "").rstrip("/")
+    if re.search(r"/ImageServer$", stripped, re.IGNORECASE):
+        return stripped
+    return None
+
+
 def _tile_urls(base: str, z: int, x: int, y: int) -> list[str]:
-    base = base.rstrip("/")
-    return [
-        f"{base}/{z}/{x}/{y}.png",
-        f"{base}/{z}/{x}/{y}",
-        f"{base}/{z}/{y}/{x}.png",
-        f"{base}/{z}/{y}/{x}",
-        f"{base}/wmts/{z}/{x}/{y}.png",
-    ]
+    base = (base or "").rstrip("/")
+    urls: list[str] = []
+    root = _image_server_root(base)
+    if root:
+        urls.extend(
+            [
+                f"{root}/tile/{z}/{y}/{x}",
+                f"{root}/tile/{z}/{x}/{y}",
+            ]
+        )
+    urls.extend(
+        [
+            f"{base}/{z}/{x}/{y}.png",
+            f"{base}/{z}/{x}/{y}",
+            f"{base}/{z}/{y}/{x}.png",
+            f"{base}/{z}/{y}/{x}",
+            f"{base}/wmts/{z}/{x}/{y}.png",
+        ]
+    )
+    seen: set[str] = set()
+    unique: list[str] = []
+    for url in urls:
+        if url not in seen:
+            seen.add(url)
+            unique.append(url)
+    return unique
 
 
 async def fetch_tile(db: AsyncSession, user: User, z: int, x: int, y: int) -> tuple[bytes, str]:

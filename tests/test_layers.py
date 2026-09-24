@@ -62,3 +62,4 @@ def test_openapi_layer_routes(client):
     assert "/api/v1/layers/export" in paths
     assert "/api/v1/objects/merge" in paths
     assert "/api/v1/folders/" in paths
+    assert "/api/v1/layers/{layer_id}/objects" in paths
