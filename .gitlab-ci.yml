@@ -7,6 +7,7 @@ variables:
   KUBE_NAMESPACE: "ml-service"
   API_IMAGE: "agriculture-vision-api"
   WORKER_IMAGE: "agriculture-vision-worker"
+  FRONTEND_IMAGE: "agriculture-vision-frontend"
 
 # --- СТАДИЯ TEST ---
 unit-tests:
@@ -57,6 +58,7 @@ build-images:
     - echo "Сборка Docker-образов напрямую внутри кластера..."
     - docker build -f deploy/Dockerfile.api -t $API_IMAGE:$CI_COMMIT_SHORT_SHA .
     - docker build -f deploy/Dockerfile.worker -t $WORKER_IMAGE:$CI_COMMIT_SHORT_SHA .
+    - docker build -f deploy/Dockerfile.nginx -t $FRONTEND_IMAGE:$CI_COMMIT_SHORT_SHA .
   rules:
     - if: '$CI_COMMIT_BRANCH == "dev"'
     - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
@@ -85,8 +87,10 @@ deploy-k8s:
     - echo "Подстановка образов и деплой API/Worker..."
     - sed -i "s|API_IMAGE_PLACEHOLDER|$API_IMAGE:$CI_COMMIT_SHORT_SHA|g" k8s/api-deployment.yaml
     - sed -i "s|WORKER_IMAGE_PLACEHOLDER|$WORKER_IMAGE:$CI_COMMIT_SHORT_SHA|g" k8s/worker-deployment.yaml
+    - sed -i "s|FRONTEND_IMAGE_PLACEHOLDER|$FRONTEND_IMAGE:$CI_COMMIT_SHORT_SHA|g" k8s/frontend-deployment.yaml
     - kubectl apply -f k8s/api-deployment.yaml
     - kubectl apply -f k8s/worker-deployment.yaml
+    - kubectl apply -f k8s/frontend-deployment.yaml
 
     - echo "Применение миграций Alembic..."
     - sleep 5
@@ -95,6 +99,7 @@ deploy-k8s:
     - echo "Проверка завершения раскатки..."
     - kubectl rollout status deployment/agriculture-vision-api -n $KUBE_NAMESPACE --timeout=120s
     - kubectl rollout status deployment/agriculture-vision-worker -n $KUBE_NAMESPACE --timeout=120s
+    - kubectl rollout status deployment/agriculture-vision-frontend -n $KUBE_NAMESPACE --timeout=120s
   rules:
     - if: '$CI_COMMIT_BRANCH == "dev"'
     - if: '$CI_COMMIT_BRANCH == "main"'
