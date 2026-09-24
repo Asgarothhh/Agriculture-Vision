@@ -50,8 +50,7 @@ build-images:
   stage: build
   script:
     - echo "Проверка и запуск Minikube..."
-    - minikube status || minikube start --driver=docker --memory=8192 --cpus=4 || (minikube delete --all && minikube start --driver=docker --memory=8192 --cpus=4)
-
+    - minikube status || minikube start --driver=docker --container-runtime=docker --memory=8192 --cpus=4 || (minikube delete --all && minikube start --driver=docker --container-runtime=docker --memory=8192 --cpus=4)
     - echo "Переключение Docker на демон Minikube..."
     - eval $(minikube docker-env)
 
