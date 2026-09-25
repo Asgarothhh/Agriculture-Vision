@@ -60,8 +60,8 @@ build-images:
     policy: pull-push
   script:
     - minikube status || minikube start --driver=docker --memory=8192 --cpus=4 || (minikube delete --all && minikube start --driver=docker --memory=8192 --cpus=4)
-    - bash deploy/prepare-weights.sh
     - eval "$(minikube docker-env)"
+    - bash deploy/prepare-weights.sh
     - docker build -f deploy/Dockerfile.api -t "$API_IMAGE:$CI_COMMIT_SHORT_SHA" .
     - docker build -f deploy/Dockerfile.worker -t "$WORKER_IMAGE:$CI_COMMIT_SHORT_SHA" .
     - docker build -f deploy/Dockerfile.nginx --no-cache --build-arg CI_COMMIT_SHORT_SHA="$CI_COMMIT_SHORT_SHA" -t "$NGINX_IMAGE:$CI_COMMIT_SHORT_SHA" .
