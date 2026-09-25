@@ -1,0 +1,25 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: minio-create-bucket
+  namespace: ml-service
+spec:
+  template:
+    spec:
+      containers:
+      - name: mc
+        image: quay.io/minio/mc:latest
+        command: ["/bin/sh", "-c"]
+        args:
+          - >
+            sleep 5;
+            mc alias set local http://minio:9000 minioadmin minioadmin;
+            mc mb --ignore-existing local/agrovision;
+        resources:
+          requests:
+            cpu: "100m"
+            memory: "256Mi"
+          limits:
+            cpu: "250m"
+            memory: "256Mi"
+      restartPolicy: OnFailure
