@@ -95,28 +95,16 @@ deploy-k8s:
     - kubectl apply -f k8s/postgres.yaml
     - kubectl apply -f k8s/redis.yaml
     - kubectl rollout status deployment/postgres-deployment -n "$KUBE_NAMESPACE" --timeout=180s
-<<<<<<< HEAD
 
 
     - tmpdir="$(mktemp -d)"
     - sed "s|API_IMAGE_PLACEHOLDER|$API_IMAGE:$CI_COMMIT_SHORT_SHA|g" k8s/api-deployment.yaml > "$tmpdir/api.yaml"
     - sed "s|WORKER_IMAGE_PLACEHOLDER|$WORKER_IMAGE:$CI_COMMIT_SHORT_SHA|g" k8s/worker-deployment.yaml > "$tmpdir/worker.yaml"
     - sed "s|NGINX_IMAGE_PLACEHOLDER|$NGINX_IMAGE:$CI_COMMIT_SHORT_SHA|g; s|GIT_SHA_PLACEHOLDER|$CI_COMMIT_SHORT_SHA|g" k8s/nginx.yaml > "$tmpdir/nginx.yaml"
-=======
-    - tmpdir="$(mktemp -d)"
-    - 'sed "s|API_IMAGE_PLACEHOLDER|$API_IMAGE:$CI_COMMIT_SHORT_SHA|g" k8s/api-deployment.yaml > "$tmpdir/api.yaml"'
-    - 'sed "s|WORKER_IMAGE_PLACEHOLDER|$WORKER_IMAGE:$CI_COMMIT_SHORT_SHA|g" k8s/worker-deployment.yaml > "$tmpdir/worker.yaml"'
-    - 'sed "s|NGINX_IMAGE_PLACEHOLDER|$NGINX_IMAGE:$CI_COMMIT_SHORT_SHA|g" k8s/nginx.yaml > "$tmpdir/nginx.yaml"'
-    - sed -i "s|GIT_SHA_PLACEHOLDER|${CI_COMMIT_SHORT_SHA}|g" "$tmpdir/nginx.yaml"
->>>>>>> ee8c095 (fixed .gitlab-ci.yml)
     - kubectl apply -f "$tmpdir/api.yaml"
     - kubectl apply -f "$tmpdir/worker.yaml"
     - kubectl apply -f "$tmpdir/nginx.yaml"
     - kubectl rollout restart deployment/agriculture-vision-nginx -n "$KUBE_NAMESPACE"
-<<<<<<< HEAD
-
-=======
->>>>>>> ee8c095 (fixed .gitlab-ci.yml)
     - kubectl rollout status deployment/agriculture-vision-api -n "$KUBE_NAMESPACE" --timeout=300s
     - kubectl rollout status deployment/agriculture-vision-worker -n "$KUBE_NAMESPACE" --timeout=180s
     - kubectl rollout status deployment/agriculture-vision-nginx -n "$KUBE_NAMESPACE" --timeout=120s
