@@ -57,13 +57,7 @@ def load_segformer_checkpoint(
     state = remap_segformer_state_dict(raw_state, target_keys)
     state = _inflate_first_conv_3ch_to_4ch(state)
     # #region agent log
-    try:
-        import json as _json, time as _time
-        proj = next((k for k in state if k.endswith("patch_embeddings.proj.weight")), None)
-        with open("/home/asgaroth/Projects/Agriculture-Vision/Agriculture-Vision/.cursor/debug-14c4e4.log", "a") as _f:
-            _f.write(_json.dumps({"sessionId":"14c4e4","hypothesisId":"D","location":"seg_infer.py:load_segformer_checkpoint","message":"proj shapes before load_state_dict","data":{"ckpt_proj":list(raw_state.get(proj).shape) if proj and proj in raw_state else None,"adapted_proj":list(state.get(proj).shape) if proj and proj in state else None,"model_proj":list(model.state_dict()[proj].shape) if proj and proj in model.state_dict() else None},"timestamp":int(_time.time()*1000)})+"\n")
-    except Exception:
-        pass
+    
     # #endregion
     incompatible = model.load_state_dict(state, strict=False)
     missing = list(incompatible.missing_keys)
