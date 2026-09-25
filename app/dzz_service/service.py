@@ -1,53 +1,30 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
-import struct
-from datetime import UTC, datetime
 from typing import Any
-from xml.etree import ElementTree as ET
+from urllib.parse import urljoin, urlparse
 
 import httpx
-from fastapi import HTTPException, status
-from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
+from fastapi import HTTPException, Request, status
+from fastapi.responses import Response
 
 from app.core.config import get_settings
-from app.core.security import decrypt_secret, encrypt_secret
-from app.dzz_service.models import DzzConnection
-from app.users_service.models import User
+from app.dzz_service.sessions import (
+    COOKIE_NAME,
+    delete_session,
+    get_session,
+    put_session,
+)
+from app.dzz_service.wmts import (
+    parse_wmts_capabilities,
+    parse_wmts_layers_flat,
+    pick_suggested_wmts,
+    resolve_wmts_capabilities_url,
+)
 
 logger = logging.getLogger(__name__)
-
-# #region agent log
-_DEBUG_LOG = "/home/asgaroth/Projects/Agriculture-Vision/Agriculture-Vision/.cursor/debug-14c4e4.log"
-
-
-def _dbg(hypothesis_id: str, message: str, data: dict[str, Any]) -> None:
-    try:
-        import json
-        import time
-
-        with open(_DEBUG_LOG, "a", encoding="utf-8") as handle:
-            handle.write(
-                json.dumps(
-                    {
-                        "sessionId": "14c4e4",
-                        "hypothesisId": hypothesis_id,
-                        "location": "app/dzz_service/service.py",
-                        "message": message,
-                        "data": data,
-                        "timestamp": int(time.time() * 1000),
-                    },
-                    default=str,
-                )
-                + "\n"
-            )
-    except Exception:
-        pass
-
-
-# #endregion
 
 TRANSPARENT_PNG = (
     b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01"
@@ -55,23 +32,16 @@ TRANSPARENT_PNG = (
     b"\x00\x00\x05\x00\x01\r\n-\xb4\x00\x00\x00\x00IEND\xaeB`\x82"
 )
 
-DEFAULT_REGIONS = [
-    ["Минская область", 53.9, 27.55],
-    ["Брестская область", 52.1, 23.7],
-    ["Гомельская область", 52.44, 30.99],
-    ["Гродненская область", 53.68, 23.83],
-    ["Витебская область", 55.19, 30.17],
-    ["Могилёвская область", 53.9, 30.34],
-]
-
-WEB_MERCATOR_ORIGIN = 20037508.342789244
-GOOGLE_Z0_RES = 156543.03392804097
-PNG_MAGIC = b"\x89PNG"
-JPEG_MAGIC = b"\xff\xd8"
-WEBP_MAGIC = b"RIFF"
-ORTHO_DEFAULT = (
-    "https://www.dzz.by/arcgis/rest/services/georesursDDZ/Belarus_web_mercator_all/ImageServer"
+DZZ_UPSTREAM = "https://www.dzz.by"
+DZZ_ALLOWED_HOSTS = {"dzz.by", "www.dzz.by", "geodzz.by", "www.geodzz.by"}
+DZZ_DEFAULT_SERVICE = (
+    "https://www.dzz.by/arcgis/rest/services/georesursDDZ/Polya_all/ImageServer"
 )
+DZZ_CACHE_MIN_Z = 10
+DZZ_CACHE_MAX_Z = 14
+DZZ_Z_OFFSET = 8
+WEB_MERCATOR_ORIGIN = 20037508.342789244
+WMTS_MAX_BYTES = int(2.5 * 1024 * 1024)
 DZZ_HTTP_HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -80,8 +50,7 @@ DZZ_HTTP_HEADERS = {
     "Accept": "*/*",
     "Referer": "https://www.dzz.by/",
 }
-_lod_cache: dict[str, list[dict[str, Any]]] = {}
-
+DZZ_HOST_RE = re.compile(r"^(?:www\.)?(?:geo)?dzz\.by$", re.IGNORECASE)
 IMAGE_SERVER_ROOT_RE = re.compile(
     r"(https?://[^/]+/arcgis/rest/services/[^/]+/[^/]+/ImageServer)",
     re.IGNORECASE,
@@ -94,81 +63,84 @@ XYZ_TEMPLATE_RE = re.compile(
     r"/\{z\}/\{[xy]\}/\{[xy]\}(?:\.png)?/?$",
     re.IGNORECASE,
 )
+WMTS_CAPS_RE = re.compile(
+    r"/WMTS(?:/1\.0\.0)?/WMTSCapabilities\.xml.*$",
+    re.IGNORECASE,
+)
+
+STATUS_ONLINE = "online"
+STATUS_BAD_CREDENTIALS = "bad_credentials"
+STATUS_UNAVAILABLE = "unavailable"
 
 
-def _http_auth(login: str, password: str) -> tuple[str, str] | None:
-    if login or password:
-        return login, password
-    return None
+def _settings_default_url() -> str:
+    return get_settings().dzz_default_url or DZZ_DEFAULT_SERVICE
 
 
-def _utcnow() -> datetime:
-    return datetime.now(UTC)
+def _is_allowed_host(hostname: str | None) -> bool:
+    host = (hostname or "").strip().lower()
+    return host in DZZ_ALLOWED_HOSTS or bool(DZZ_HOST_RE.match(host))
 
 
-def _image_server_root(url: str) -> str | None:
-    match = IMAGE_SERVER_ROOT_RE.search(url or "")
-    if match:
-        return match.group(1).rstrip("/")
-    stripped = (url or "").rstrip("/")
-    if re.search(r"/ImageServer$", stripped, re.IGNORECASE):
-        return stripped
-    return None
+def looks_like_json(content_type: str, body: bytes) -> bool:
+    lowered = (content_type or "").split(";")[0].strip().lower()
+    if "json" in lowered:
+        return True
+    stripped = body.lstrip()[:1]
+    return stripped in {b"{", b"["}
+
+
+def classify_upstream(status_code: int, content_type: str, body: bytes) -> str:
+    if status_code in {401, 403}:
+        if looks_like_json(content_type, body):
+            return STATUS_BAD_CREDENTIALS
+        return STATUS_UNAVAILABLE
+    if status_code >= 400:
+        return STATUS_UNAVAILABLE
+    if looks_like_json(content_type, body):
+        try:
+            import json
+
+            payload = json.loads(body.decode("utf-8", errors="ignore") or "null")
+        except ValueError:
+            return STATUS_ONLINE
+        error = payload.get("error") if isinstance(payload, dict) else None
+        if isinstance(error, dict):
+            code = int(error.get("code") or 0)
+            if code in {401, 403, 498, 499}:
+                return STATUS_BAD_CREDENTIALS
+            return STATUS_UNAVAILABLE
+    return STATUS_ONLINE
 
 
 def normalize_service_url(url: str | None) -> str:
     raw = (url or "").strip()
+    raw = WMTS_CAPS_RE.sub("", raw)
     raw = TILE_TEMPLATE_RE.sub("", raw)
     raw = XYZ_TEMPLATE_RE.sub("", raw)
     raw = raw.rstrip("/")
-    root = _image_server_root(raw)
-    return root or raw
+    match = IMAGE_SERVER_ROOT_RE.search(raw)
+    if match:
+        return match.group(1).rstrip("/")
+    if re.search(r"/ImageServer$", raw, re.IGNORECASE):
+        return raw
+    return raw
 
 
-def effective_service_url(url: str | None) -> str:
-    """Polya_all is a field mask, not nationwide ortho — empty/white in cities."""
-    root = normalize_service_url(url)
-    if "/Polya_all/ImageServer" in (root or ""):
-        return root.replace("/Polya_all/ImageServer", "/Belarus_web_mercator_all/ImageServer")
-    return root or ORTHO_DEFAULT
-
-
-def _host_variants(url: str) -> list[str]:
-    variants = [url]
-    replacements = (
-        ("https://www.dzz.by", "https://geodzz.by"),
-        ("https://dzz.by", "https://geodzz.by"),
-        ("https://www.dzz.by", "https://www.geodzz.by"),
-        ("https://geodzz.by", "https://www.dzz.by"),
-    )
-    for src, dst in replacements:
-        if src in url:
-            variants.append(url.replace(src, dst, 1))
-    seen: set[str] = set()
-    unique: list[str] = []
-    for item in variants:
-        if item not in seen:
-            seen.add(item)
-            unique.append(item)
-    return unique
-
-
-def _probe_url(url: str) -> str:
-    root = effective_service_url(url)
-    if root and re.search(r"ImageServer$", root, re.IGNORECASE):
-        return f"{root}?f=json"
+def resolve_dzz_service_root(url: str | None) -> str:
+    root = normalize_service_url(url or _settings_default_url())
+    parsed = urlparse(root)
+    if parsed.scheme not in {"http", "https"} or not _is_allowed_host(parsed.hostname):
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            detail="URL должен указывать на ImageServer dzz.by",
+        )
+    if not re.search(r"/ImageServer$", root, re.IGNORECASE):
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            detail="URL должен указывать на ArcGIS ImageServer",
+        )
     return root
-
-
-def _google_lod(lods: list[dict[str, Any]], z: int) -> int | None:
-    if not lods:
-        return z
-    target = GOOGLE_Z0_RES / (2 ** max(z, 0))
-    best = min(lods, key=lambda item: abs(float(item.get("resolution") or 0) - target))
-    res = float(best.get("resolution") or 0)
-    if res <= 0 or abs(res - target) / target > 0.25:
-        return None
-    return int(best["level"])
 
 
 def _tile_bbox_3857(z: int, x: int, y: int) -> tuple[float, float, float, float]:
@@ -179,7 +151,7 @@ def _tile_bbox_3857(z: int, x: int, y: int) -> tuple[float, float, float, float]
     return minx, maxy - size, minx + size, maxy
 
 
-def _export_image_url(root: str, z: int, x: int, y: int, fmt: str = "jpg") -> str:
+def dzz_export_image_url(root: str, z: int, x: int, y: int, fmt: str = "jpg") -> str:
     minx, miny, maxx, maxy = _tile_bbox_3857(z, x, y)
     return (
         f"{root}/exportImage?bbox={minx},{miny},{maxx},{maxy}"
@@ -187,355 +159,405 @@ def _export_image_url(root: str, z: int, x: int, y: int, fmt: str = "jpg") -> st
     )
 
 
-def _tile_urls(base: str, z: int, x: int, y: int, lod: int | None = None) -> list[str]:
-    base = effective_service_url(base)
-    tile_z = z if lod is None else lod
-    urls: list[str] = []
-    for root_candidate in _host_variants(base):
-        root = _image_server_root(root_candidate)
-        if root:
-            urls.extend(
-                [
-                    f"{root}/tile/{tile_z}/{y}/{x}",
-                    _export_image_url(root, z, x, y, "jpg"),
-                    f"{root}/tile/{tile_z}/{x}/{y}",
-                    _export_image_url(root, z, x, y, "png"),
-                ]
-            )
-        urls.extend(
-            [
-                f"{root_candidate}/{z}/{x}/{y}.png",
-                f"{root_candidate}/{z}/{x}/{y}",
-                f"{root_candidate}/{z}/{y}/{x}.png",
-                f"{root_candidate}/{z}/{y}/{x}",
-                f"{root_candidate}/wmts/{z}/{x}/{y}.png",
-            ]
-        )
-    seen: set[str] = set()
-    unique: list[str] = []
-    for url in urls:
-        if url not in seen:
-            seen.add(url)
-            unique.append(url)
-    return unique
+def image_server_tile_url(root: str, z: int, x: int, y: int) -> str:
+    if DZZ_CACHE_MIN_Z <= z <= DZZ_CACHE_MAX_Z:
+        return f"{root}/tile/{z - DZZ_Z_OFFSET}/{y}/{x}"
+    return dzz_export_image_url(root, z, x, y)
 
 
-def _looks_like_image(content: bytes, content_type: str) -> bool:
-    if content == TRANSPARENT_PNG or len(content) < 400:
-        return False
-    if content.startswith(PNG_MAGIC) and len(content) >= 24:
-        width, height = struct.unpack(">II", content[16:24])
-        if width <= 1 and height <= 1:
-            return False
-        if len(content) < 1500:
-            return False
-    if content.startswith(JPEG_MAGIC) and len(content) < 1500:
-        return False
-    lowered = (content_type or "").split(";")[0].strip().lower()
-    if lowered.startswith("application/json") or lowered.startswith("text/"):
-        return False
-    if content.startswith(PNG_MAGIC) or content.startswith(JPEG_MAGIC) or content.startswith(WEBP_MAGIC):
-        return True
-    return lowered.startswith("image/") and not lowered.endswith("json")
+def _auth_tuple(login: str, password: str) -> tuple[str, str] | None:
+    if login or password:
+        return login, password
+    return None
 
 
-async def _owned_connection(db: AsyncSession, user: User) -> DzzConnection | None:
-    return (
-        await db.execute(select(DzzConnection).where(DzzConnection.user_id == user.id))
-    ).scalar_one_or_none()
+def _session_from_request(request: Request) -> dict[str, Any] | None:
+    return get_session(request.cookies.get(COOKIE_NAME))
 
 
-async def probe_connection(url: str, login: str, password: str) -> str:
-    last = "unavailable"
+def _require_session(request: Request) -> dict[str, Any]:
+    row = _session_from_request(request)
+    if row is None:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, detail="Нет сессии dzz.by")
+    return row
+
+
+def _origin_of(url: str) -> str:
+    parsed = urlparse(url)
+    return f"{parsed.scheme}://{parsed.netloc}"
+
+
+def _assert_dzz_origin(url: str) -> None:
+    parsed = urlparse(url)
+    if not _is_allowed_host(parsed.hostname):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, detail="host is not allowed")
+
+
+async def fetch_dzz_upstream(
+    client: httpx.AsyncClient,
+    url: str,
+    auth: tuple[str, str] | None,
+    method: str = "GET",
+    **kwargs: Any,
+) -> httpx.Response:
+    last_error: Exception | None = None
+    response: httpx.Response | None = None
+    for attempt in range(3):
+        try:
+            response = await client.request(method, url, auth=auth, **kwargs)
+        except httpx.HTTPError as exc:
+            last_error = exc
+            await asyncio.sleep(0.4 * (attempt + 1))
+            continue
+        if response.status_code >= 500 or response.status_code == 520:
+            if attempt < 2:
+                await asyncio.sleep(0.4 * (attempt + 1))
+                continue
+        return response
+    if response is not None:
+        return response
+    raise last_error or httpx.HTTPError("dzz.by unavailable")
+
+
+async def probe_dzz_service(login: str, password: str, root: str) -> str:
+    target = f"{root}?f=json"
     try:
         async with httpx.AsyncClient(
             timeout=10.0, follow_redirects=True, headers=DZZ_HTTP_HEADERS
         ) as client:
-            for candidate in _host_variants(effective_service_url(url)):
-                target = _probe_url(candidate)
-                if not target:
-                    continue
-                try:
-                    auth = _http_auth(login, password)
-                    response = await client.get(target, auth=auth)
-                except httpx.HTTPError:
-                    last = "unavailable"
-                    continue
-                if response.status_code in {401, 403}:
-                    return "bad_credentials"
-                if response.status_code >= 400:
-                    last = "unavailable"
-                    continue
-                content_type = response.headers.get("content-type", "")
-                if "json" in content_type.lower():
-                    try:
-                        payload = response.json()
-                    except ValueError:
-                        return "online"
-                    error = payload.get("error") if isinstance(payload, dict) else None
-                    if isinstance(error, dict):
-                        code = int(error.get("code") or 0)
-                        if code in {401, 403, 498, 499}:
-                            return "bad_credentials"
-                        last = "unavailable"
-                        continue
-                return "online"
+            try:
+                response = await fetch_dzz_upstream(
+                    client, target, _auth_tuple(login, password)
+                )
+            except httpx.HTTPError:
+                return STATUS_UNAVAILABLE
+            return classify_upstream(
+                response.status_code,
+                response.headers.get("content-type", ""),
+                response.content or b"",
+            )
     except httpx.HTTPError:
-        return "unavailable"
-    return last
+        return STATUS_UNAVAILABLE
 
 
-async def connect(
-    db: AsyncSession,
-    user: User,
-    login: str,
-    password: str,
-    service_url: str | None,
-) -> dict[str, Any]:
-    settings = get_settings()
-    url = effective_service_url(service_url or settings.dzz_default_url)
-    status_value = await probe_connection(url, login, password)
-    if status_value == "bad_credentials":
+async def connect(request: Request, login: str, password: str, service_url: str | None) -> dict[str, Any]:
+    root = resolve_dzz_service_root(service_url or _settings_default_url())
+    status_value = await probe_dzz_service(login, password, root)
+    if status_value == STATUS_BAD_CREDENTIALS:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, detail="Неверные учётные данные dzz.by")
-    if status_value == "unavailable":
+    if status_value == STATUS_UNAVAILABLE:
         raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, detail="dzz.by недоступен")
+    sid = put_session(request.cookies.get(COOKIE_NAME), login, password, root)
+    return {"status": status_value, "service_url": root, "url": root, "sid": sid, "connected": True}
 
-    row = await _owned_connection(db, user)
+
+def status_payload(request: Request) -> dict[str, Any]:
+    row = _session_from_request(request)
     if row is None:
-        row = DzzConnection(user_id=user.id, service_url=url)
-        db.add(row)
-    row.login_encrypted = encrypt_secret(login)
-    row.password_encrypted = encrypt_secret(password)
-    row.service_url = url
-    row.is_active = True
-    row.last_status = status_value
-    row.last_check_at = _utcnow()
-    await db.commit()
-    return {"status": status_value, "service_url": url}
-
-
-async def check(db: AsyncSession, user: User) -> dict[str, Any]:
-    row = await _owned_connection(db, user)
-    if row is None or not row.is_active:
-        return {"status": "unavailable"}
-    status_value = await probe_connection(
-        row.service_url,
-        decrypt_secret(row.login_encrypted),
-        decrypt_secret(row.password_encrypted),
-    )
-    row.last_status = status_value
-    row.last_check_at = _utcnow()
-    await db.commit()
-    return {"status": status_value}
-
-
-async def disconnect(db: AsyncSession, user: User) -> None:
-    row = await _owned_connection(db, user)
-    if row:
-        await db.delete(row)
-        await db.commit()
-
-
-async def status_payload(db: AsyncSession, user: User) -> dict[str, Any]:
-    row = await _owned_connection(db, user)
-    if row is None:
-        return {"status": "unavailable", "connected": False}
+        return {"status": STATUS_UNAVAILABLE, "connected": False}
     return {
-        "status": row.last_status,
-        "connected": row.is_active,
-        "last_check_at": row.last_check_at,
-        "service_url": row.service_url,
+        "status": STATUS_ONLINE,
+        "connected": True,
+        "service_url": row.get("url"),
+        "url": row.get("url"),
     }
 
 
-def _auth_tuple(row: DzzConnection) -> tuple[str, str]:
-    return decrypt_secret(row.login_encrypted), decrypt_secret(row.password_encrypted)
+async def health_payload(request: Request) -> dict[str, Any]:
+    row = _session_from_request(request)
+    if row is None:
+        return {"status": STATUS_UNAVAILABLE, "connected": False}
+    status_value = await probe_dzz_service(row["login"], row["password"], row["url"])
+    return {
+        "status": status_value,
+        "connected": status_value == STATUS_ONLINE,
+        "service_url": row.get("url"),
+        "url": row.get("url"),
+    }
 
 
-async def fetch_tile(db: AsyncSession, user: User, z: int, x: int, y: int) -> tuple[bytes, str]:
-    row = await _owned_connection(db, user)
-    if row is None or not row.is_active:
-        # #region agent log
-        _dbg("A", "fetch_tile no connection", {"z": z, "x": x, "y": y, "has_row": row is not None})
-        # #endregion
-        return TRANSPARENT_PNG, "image/png"
+def disconnect(request: Request) -> None:
+    delete_session(request.cookies.get(COOKIE_NAME))
 
-    cache_key = f"dzz:v2:{user.id}:{z}:{x}:{y}"
-    cached = await _redis_get(cache_key)
-    if cached and _looks_like_image(cached, "image/jpeg"):
-        media = "image/jpeg" if cached.startswith(JPEG_MAGIC) else "image/png"
-        # #region agent log
-        _dbg("E", "fetch_tile cache hit", {"z": z, "x": x, "y": y, "bytes": len(cached), "media": media})
-        # #endregion
-        return cached, media
 
-    login, password = _auth_tuple(row)
-    root = effective_service_url(row.service_url)
-    auth = _http_auth(login, password)
-    # #region agent log
-    _dbg(
-        "B",
-        "fetch_tile upstream start",
-        {"z": z, "x": x, "y": y, "root": root[-80:], "stored": (row.service_url or "")[-80:], "has_auth": bool(auth)},
+def _proxy_target(session_url: str, path: str, query: str) -> str:
+    origin = _origin_of(session_url) or DZZ_UPSTREAM
+    _assert_dzz_origin(origin)
+    suffix = path if path.startswith("/") else f"/{path}"
+    target = urljoin(origin + "/", suffix.lstrip("/"))
+    parsed = urlparse(target)
+    if parsed.path.startswith("/arcgis/") is False:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, detail="path must start with /arcgis/")
+    _assert_dzz_origin(target)
+    if origin.rstrip("/") != _origin_of(target):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, detail="origin mismatch")
+    if query:
+        return f"{target}?{query}" if "?" not in target else f"{target}&{query}"
+    return target
+
+
+async def proxy_arcgis(request: Request, path: str) -> Response:
+    row = _require_session(request)
+    target = _proxy_target(row["url"], path, request.url.query)
+    auth = _auth_tuple(row["login"], row["password"])
+    try:
+        async with httpx.AsyncClient(
+            timeout=12.0, follow_redirects=True, headers=DZZ_HTTP_HEADERS
+        ) as client:
+            upstream = await fetch_dzz_upstream(
+                client,
+                target,
+                auth,
+                method=request.method if request.method in {"GET", "HEAD", "POST"} else "GET",
+                content=await request.body() if request.method == "POST" else None,
+            )
+    except httpx.HTTPError as exc:
+        logger.info("dzz proxy unavailable %s: %s", target, exc)
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, detail="dzz.by недоступен") from exc
+
+    kind = classify_upstream(
+        upstream.status_code,
+        upstream.headers.get("content-type", ""),
+        upstream.content or b"",
     )
-    # #endregion
-    async with httpx.AsyncClient(
-        timeout=20.0, follow_redirects=True, headers=DZZ_HTTP_HEADERS
-    ) as client:
-        lods = await _service_lods(client, root, auth)
-        lod = _google_lod(lods, z)
-        for url in _tile_urls(root, z, x, y, lod):
-            try:
-                response = await client.get(url, auth=auth)
-            except httpx.HTTPError:
-                continue
-            if response.status_code in {204, 404, 520}:
-                continue
-            if response.status_code == 200 and response.content:
-                content_type = response.headers.get("content-type", "image/jpeg")
-                if _looks_like_image(response.content, content_type):
-                    media = content_type.split(";")[0].strip()
-                    if not media.startswith("image/"):
-                        media = "image/jpeg" if response.content.startswith(JPEG_MAGIC) else "image/png"
-                    await _redis_set(cache_key, response.content)
-                    # #region agent log
-                    _dbg(
-                        "B",
-                        "fetch_tile upstream ok",
-                        {
-                            "z": z,
-                            "x": x,
-                            "y": y,
-                            "lod": lod,
-                            "bytes": len(response.content),
-                            "media": media,
-                            "url": url[-90:],
-                        },
-                    )
-                    # #endregion
-                    return response.content, media
-                logger.info(
-                    "dzz tile skipped %s status=%s content-type=%s bytes=%s",
-                    url,
-                    response.status_code,
-                    content_type,
-                    len(response.content),
-                )
-            elif response.status_code not in {401, 403}:
-                logger.info("dzz tile miss %s status=%s", url, response.status_code)
-    # #region agent log
-    _dbg("B", "fetch_tile fallback transparent", {"z": z, "x": x, "y": y, "lod": lod, "root": root[-80:]})
-    # #endregion
+    if kind == STATUS_BAD_CREDENTIALS:
+        return Response(
+            content=upstream.content,
+            status_code=401,
+            media_type=upstream.headers.get("content-type", "application/json"),
+        )
+    if kind == STATUS_UNAVAILABLE and upstream.status_code in {401, 403}:
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, detail="dzz.by недоступен")
+
+    media = upstream.headers.get("content-type") or "application/octet-stream"
+    return Response(content=upstream.content, status_code=upstream.status_code, media_type=media)
+
+
+async def fetch_tile(request: Request, z: int, x: int, y: int) -> tuple[bytes, str]:
+    row = _session_from_request(request)
+    if row is None:
+        return TRANSPARENT_PNG, "image/png"
+    root = row["url"]
+    url = image_server_tile_url(root, z, x, y)
+    parsed = urlparse(url)
+    path = parsed.path.lstrip("/")
+    query = parsed.query
+    # Reuse proxy validation without requiring a second hop through FastAPI.
+    dummy_path = path
+    target = _proxy_target(root, dummy_path, query)
+    auth = _auth_tuple(row["login"], row["password"])
+    try:
+        async with httpx.AsyncClient(
+            timeout=12.0, follow_redirects=True, headers=DZZ_HTTP_HEADERS
+        ) as client:
+            response = await fetch_dzz_upstream(client, target, auth)
+    except httpx.HTTPError:
+        return TRANSPARENT_PNG, "image/png"
+    if response.status_code == 200 and response.content:
+        media = response.headers.get("content-type", "image/jpeg").split(";")[0].strip()
+        if not media.startswith("image/"):
+            media = "image/jpeg"
+        return response.content, media
     return TRANSPARENT_PNG, "image/png"
 
 
-async def _service_lods(
-    client: httpx.AsyncClient, root: str, auth: tuple[str, str] | None
-) -> list[dict[str, Any]]:
-    cached = _lod_cache.get(root)
-    if cached is not None:
-        return cached
+def _is_dzz_url(url: str) -> bool:
     try:
-        response = await client.get(f"{root}?f=json", auth=auth)
-        payload = response.json() if response.status_code == 200 else {}
-        lods = (payload.get("tileInfo") or {}).get("lods") or []
+        return _is_allowed_host(urlparse(url).hostname)
     except Exception:
-        lods = []
-    _lod_cache[root] = lods
-    return lods
+        return False
 
 
-async def _redis_get(key: str) -> bytes | None:
+async def _download_wmts_xml(url: str, login: str, password: str) -> str:
+    dzz_source = _is_dzz_url(url)
+    if dzz_source:
+        _assert_dzz_origin(url)
+    async with httpx.AsyncClient(
+        timeout=20.0, follow_redirects=True, headers=DZZ_HTTP_HEADERS
+    ) as client:
+        response = await fetch_dzz_upstream(client, url, _auth_tuple(login, password))
+    kind = classify_upstream(
+        response.status_code,
+        response.headers.get("content-type", ""),
+        response.content or b"",
+    )
+    if kind == STATUS_BAD_CREDENTIALS:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, detail="Неверные учётные данные dzz.by")
+    if kind == STATUS_UNAVAILABLE and dzz_source:
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, detail="dzz.by недоступен")
+    if response.status_code != 200 or not response.content:
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, detail="Не удалось загрузить WMTSCapabilities")
+    if len(response.content) > WMTS_MAX_BYTES:
+        raise HTTPException(status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail="WMTSCapabilities слишком большой")
+    return response.text
+
+
+async def annotate_wmts_reachable(
+    catalog: dict[str, Any], login: str, password: str, source: str
+) -> dict[str, Any]:
+    suggested = catalog.get("suggested")
+    if not suggested:
+        return catalog
+    template = suggested.get("tileUrlTemplate") or ""
+    if not template:
+        return catalog
+    probe = (
+        template.replace("{TileMatrix}", "4")
+        .replace("{TileRow}", "5")
+        .replace("{TileCol}", "9")
+        .replace("{z}", "4")
+        .replace("{y}", "5")
+        .replace("{x}", "9")
+    )
+    if not probe.startswith("http"):
+        return catalog
     try:
-        import redis.asyncio as redis
-
-        client = redis.from_url(get_settings().redis_url)
-        try:
-            return await client.get(key)
-        finally:
-            await client.aclose()
-    except Exception:
-        return None
-
-
-async def _redis_set(key: str, value: bytes, ttl: int = 3600) -> None:
-    try:
-        import redis.asyncio as redis
-
-        client = redis.from_url(get_settings().redis_url)
-        try:
-            await client.setex(key, ttl, value)
-        finally:
-            await client.aclose()
-    except Exception:
-        return
+        async with httpx.AsyncClient(
+            timeout=8.0, follow_redirects=True, headers=DZZ_HTTP_HEADERS
+        ) as client:
+            response = await client.get(probe, auth=_auth_tuple(login, password))
+            code = response.status_code
+    except httpx.HTTPError:
+        return catalog
+    matrices = catalog.get("tileMatrixSets") or []
+    for matrix in matrices:
+        if matrix.get("id") == suggested.get("matrix"):
+            matrix["reachable"] = code not in {520, 404, 500}
+            matrix["status"] = code
+            if source == "dzz" and matrix.get("wellKnown") == "GoogleMapsCompatible" and code == 520:
+                matrix["reachable"] = False
+    catalog["suggested"] = pick_suggested_wmts(
+        catalog.get("layers") or [],
+        matrices,
+        catalog.get("tileUrlTemplate") or "",
+    )
+    return catalog
 
 
-async def wmts_capabilities(db: AsyncSession, user: User) -> list[dict[str, str]]:
-    row = await _owned_connection(db, user)
+async def wmts_capabilities(
+    request: Request,
+    url: str | None,
+    login: str = "",
+    password: str = "",
+) -> dict[str, Any]:
+    row = _session_from_request(request)
+    source = "custom"
+    if url and _is_dzz_url(url) or (not url and row):
+        source = "dzz"
+        if row is None:
+            raise HTTPException(status.HTTP_401_UNAUTHORIZED, detail="Нет сессии dzz.by")
+        root = resolve_dzz_service_root(url or row["url"])
+        caps_url = resolve_wmts_capabilities_url(root)
+        _assert_dzz_origin(caps_url)
+        login, password = row["login"], row["password"]
+    else:
+        if not url:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, detail="URL WMTS не указан")
+        caps_url = resolve_wmts_capabilities_url(url)
+        parsed = urlparse(caps_url)
+        if parsed.scheme not in {"http", "https"}:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, detail="Некорректный URL WMTS")
+    xml_text = await _download_wmts_xml(caps_url, login, password)
+    catalog = parse_wmts_capabilities(xml_text)
+    catalog["source"] = source
+    catalog["capabilitiesUrl"] = caps_url
+    if source == "dzz":
+        catalog = await annotate_wmts_reachable(catalog, login, password, source)
+    return catalog
+
+
+async def wmts_capabilities_flat(request: Request) -> list[dict[str, str]]:
+    row = _session_from_request(request)
     if row is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail="dzz connection not found")
-    login, password = _auth_tuple(row)
-    urls = [
-        f"{row.service_url.rstrip('/')}/WMTSCapabilities.xml",
-        f"{row.service_url.rstrip('/')}/wmts/1.0.0/WMTSCapabilities.xml",
-        f"{row.service_url.rstrip('/')}/geoserver/gwc/service/wmts?REQUEST=GetCapabilities",
-    ]
-    xml_text = None
-    async with httpx.AsyncClient(timeout=20.0, follow_redirects=True, headers=DZZ_HTTP_HEADERS) as client:
-        for url in urls:
-            try:
-                response = await client.get(url, auth=_http_auth(login, password))
-            except httpx.HTTPError:
-                continue
-            if response.status_code == 200 and response.text:
-                xml_text = response.text
-                break
-    if not xml_text:
-        return []
-    return _parse_wmts(xml_text)
-
-
-def _parse_wmts(xml_text: str) -> list[dict[str, str]]:
-    ns = {
-        "wmts": "http://www.opengis.net/wmts/1.0",
-        "ows": "http://www.opengis.net/ows/1.1",
-    }
-    try:
-        root = ET.fromstring(xml_text)
-    except ET.ParseError:
-        return []
+    catalog = await wmts_capabilities(request, row["url"])
+    xml_layers = catalog.get("layers") or []
     items: list[dict[str, str]] = []
-    layers = root.findall(".//{http://www.opengis.net/wmts/1.0}Layer") or root.findall(".//Layer")
-    for layer in layers:
-        ident = (
-            (layer.findtext("{http://www.opengis.net/ows/1.1}Identifier") or layer.findtext("Identifier") or "")
-        )
-        tilematrix = (
-            layer.findtext(".//{http://www.opengis.net/wmts/1.0}TileMatrixSet")
-            or layer.findtext(".//TileMatrixSet")
-            or ""
-        )
-        style = layer.findtext(".//{http://www.opengis.net/wmts/1.0}Style/{http://www.opengis.net/ows/1.1}Identifier")
-        if not style:
-            style = layer.findtext(".//Style/Identifier") or "default"
-        if ident:
-            items.append({"layer": ident, "tilematrix": tilematrix, "style": style})
+    for layer in xml_layers:
+        matrix = (layer.get("tileMatrixSets") or [""])[0]
+        style = layer.get("defaultStyle") or "default"
+        items.append({"layer": layer["id"], "tilematrix": matrix, "style": style})
     return items
 
 
-async def regions(db: AsyncSession, user: User) -> list[list]:
-    caps = []
+def _site_center_and_bounds(geometry: dict[str, Any]) -> tuple[list[float], list[float]] | None:
+    rings = geometry.get("rings") or geometry.get("paths") or []
+    xs: list[float] = []
+    ys: list[float] = []
+    for ring in rings:
+        for point in ring:
+            if len(point) < 2:
+                continue
+            xs.append(float(point[0]))
+            ys.append(float(point[1]))
+    if not xs:
+        x = geometry.get("x")
+        y = geometry.get("y")
+        if x is None or y is None:
+            return None
+        return [float(y), float(x)], [float(x), float(y), float(x), float(y)]
+    west, east = min(xs), max(xs)
+    south, north = min(ys), max(ys)
+    return [(south + north) / 2, (west + east) / 2], [west, south, east, north]
+
+
+def parse_dzz_sites(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    features = payload.get("features") if isinstance(payload, dict) else None
+    if not isinstance(features, list):
+        return []
+    sites: list[dict[str, Any]] = []
+    for idx, feature in enumerate(features):
+        if not isinstance(feature, dict):
+            continue
+        attrs = feature.get("attributes") or {}
+        geom = feature.get("geometry") or {}
+        parsed = _site_center_and_bounds(geom) if isinstance(geom, dict) else None
+        if not parsed:
+            continue
+        center, bounds = parsed
+        name = str(attrs.get("Name") or attrs.get("name") or attrs.get("TITLE") or f"Участок {idx + 1}")
+        sites.append(
+            {
+                "id": attrs.get("OBJECTID") or attrs.get("FID") or idx,
+                "name": name,
+                "title": name,
+                "center": center,
+                "bounds": bounds,
+            }
+        )
+    return sites
+
+
+async def query_sites(request: Request) -> list[dict[str, Any]]:
+    row = _session_from_request(request)
+    if row is None:
+        return []
+    root = row["url"]
+    query = "where=1%3D1&outFields=Name&returnGeometry=true&outSR=4326&f=json"
+    path = urlparse(root).path.lstrip("/") + "/query"
+    target = _proxy_target(root, path, query)
+    auth = _auth_tuple(row["login"], row["password"])
     try:
-        caps = await wmts_capabilities(db, user)
-    except HTTPException:
-        caps = []
-    if not caps:
-        return DEFAULT_REGIONS
-    result = []
-    for idx, item in enumerate(caps):
-        if idx < len(DEFAULT_REGIONS):
-            result.append([item["layer"], DEFAULT_REGIONS[idx][1], DEFAULT_REGIONS[idx][2]])
-        else:
-            result.append([item["layer"], 53.9, 27.55])
-    return result
+        async with httpx.AsyncClient(
+            timeout=20.0, follow_redirects=True, headers=DZZ_HTTP_HEADERS
+        ) as client:
+            response = await fetch_dzz_upstream(client, target, auth)
+    except httpx.HTTPError:
+        return []
+    if response.status_code != 200 or not looks_like_json(
+        response.headers.get("content-type", ""), response.content or b""
+    ):
+        return []
+    try:
+        payload = response.json()
+    except ValueError:
+        return []
+    return parse_dzz_sites(payload)
+
+
+async def regions(request: Request) -> list[list]:
+    sites = await query_sites(request)
+    return [[item["name"], item["center"][0], item["center"][1]] for item in sites]
+
+
+_parse_wmts = parse_wmts_layers_flat

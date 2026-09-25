@@ -1,64 +1,74 @@
 from __future__ import annotations
 
-from typing import Annotated
+from fastapi import APIRouter, Request, Response
 
-from fastapi import APIRouter, Depends
-from sqlalchemy.ext.asyncio import AsyncSession
-
-from app.core.database import get_db
-from app.core.deps import get_current_user
 from app.dzz_service import service
-from app.dzz_service.schemas import DzzConnectRequest
-from app.users_service.models import User
+from app.dzz_service.schemas import DzzConnectRequest, WmtsCapabilitiesRequest
+from app.dzz_service.sessions import COOKIE_NAME, cookie_max_age
 
 router = APIRouter(prefix="/dzz", tags=["dzz"])
 
 
+def _set_dzz_cookie(response: Response, sid: str) -> None:
+    response.set_cookie(
+        key=COOKIE_NAME,
+        value=sid,
+        httponly=True,
+        samesite="lax",
+        max_age=cookie_max_age(),
+        path="/",
+    )
+
+
+def _clear_dzz_cookie(response: Response) -> None:
+    response.delete_cookie(key=COOKIE_NAME, path="/")
+
+
 @router.post("/connect")
-async def connect(
-    payload: DzzConnectRequest,
-    current: Annotated[User, Depends(get_current_user)],
-    db: Annotated[AsyncSession, Depends(get_db)],
-):
-    return await service.connect(db, current, payload.login, payload.password, payload.service_url)
+async def connect(payload: DzzConnectRequest, request: Request, response: Response):
+    result = await service.connect(request, payload.login, payload.password, payload.service)
+    _set_dzz_cookie(response, result.pop("sid"))
+    return result
 
 
 @router.post("/check")
-async def check(
-    current: Annotated[User, Depends(get_current_user)],
-    db: Annotated[AsyncSession, Depends(get_db)],
-):
-    return await service.check(db, current)
+async def check(request: Request):
+    return await service.health_payload(request)
+
+
+@router.get("/health")
+async def health(request: Request):
+    return await service.health_payload(request)
 
 
 @router.post("/disconnect")
-async def disconnect(
-    current: Annotated[User, Depends(get_current_user)],
-    db: Annotated[AsyncSession, Depends(get_db)],
-):
-    await service.disconnect(db, current)
+async def disconnect(request: Request, response: Response):
+    service.disconnect(request)
+    _clear_dzz_cookie(response)
     return {"detail": "ok"}
 
 
 @router.get("/status")
-async def status(
-    current: Annotated[User, Depends(get_current_user)],
-    db: Annotated[AsyncSession, Depends(get_db)],
-):
-    return await service.status_payload(db, current)
+async def status(request: Request):
+    return service.status_payload(request)
 
 
 @router.get("/wmts/capabilities")
-async def capabilities(
-    current: Annotated[User, Depends(get_current_user)],
-    db: Annotated[AsyncSession, Depends(get_db)],
-):
-    return await service.wmts_capabilities(db, current)
+async def capabilities_get(request: Request):
+    return await service.wmts_capabilities_flat(request)
+
+
+@router.post("/wmts/capabilities")
+async def capabilities_post(request: Request, payload: WmtsCapabilitiesRequest | None = None):
+    body = payload or WmtsCapabilitiesRequest()
+    return await service.wmts_capabilities(request, body.url, body.login, body.password)
 
 
 @router.get("/regions")
-async def regions(
-    current: Annotated[User, Depends(get_current_user)],
-    db: Annotated[AsyncSession, Depends(get_db)],
-):
-    return await service.regions(db, current)
+async def regions(request: Request):
+    return await service.regions(request)
+
+
+@router.get("/sites")
+async def sites(request: Request):
+    return await service.query_sites(request)

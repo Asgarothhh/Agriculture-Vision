@@ -7,7 +7,6 @@ import pytest
 from sqlalchemy import func, select
 
 from app.core.seed import DEMO_PASSWORD
-from app.dzz_service.models import DzzConnection
 from app.layers_service.models import Folder, Layer, LayerObject
 from app.ml_service.models import ModelRegistry, ObjectClass, PointObject, PolygonObject
 from app.tasks_service.models import Image, ProcessingTask
@@ -64,9 +63,6 @@ def test_seed_demo_rows_in_postgres(db_session):
     assert {"PENDING", "FAILED", "COMPLETED"} <= statuses
     assert db_session.scalar(select(func.count()).select_from(PolygonObject)) >= 1
     assert db_session.scalar(select(func.count()).select_from(PointObject)) >= 1
-    dzz = db_session.scalar(select(DzzConnection).where(DzzConnection.user_id == agronom.id))
-    assert dzz is not None
-    assert dzz.is_active is False
 
 
 def test_demo_login_me_activity_and_isolation(client, demo_headers, operator_headers, db_session):
@@ -340,7 +336,7 @@ def test_delete_pending_or_failed_task(client, demo_headers, db_session, monkeyp
     assert db_session.get(ProcessingTask, task_id) is None
 
 
-def test_dzz_routes_and_disconnect(client, demo_headers, db_session):
+def test_dzz_routes_and_disconnect(client, demo_headers):
     status = client.get("/api/v1/dzz/status", headers=demo_headers)
     assert status.status_code == 200
     check = client.post("/api/v1/dzz/check", headers=demo_headers)
@@ -356,12 +352,10 @@ def test_dzz_routes_and_disconnect(client, demo_headers, db_session):
         headers=demo_headers,
         json={"login": "bad", "password": "bad", "service_url": "https://127.0.0.1:1"},
     )
-    assert connect.status_code in {401, 503}
+    assert connect.status_code in {400, 401, 503}
     disconnect = client.post("/api/v1/dzz/disconnect", headers=demo_headers)
     assert disconnect.status_code == 200
-    db_session.expire_all()
-    agronom = _user(db_session, "agronom@agrovision.dev")
-    assert db_session.scalar(select(DzzConnection).where(DzzConnection.user_id == agronom.id)) is None
+    assert client.get("/api/v1/dzz/status").json()["connected"] is False
 
 
 def test_delete_fresh_account_removes_user_row(client, db_session):

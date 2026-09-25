@@ -1,6 +1,6 @@
-import { getAccessToken } from "../api/client.js";
-import { dzzTileUrl } from "../api/dzz.js";
-import { dbg, withTimeout } from "../ui.js";
+import { dzzEnsureTileBlob, dzzPrefetch } from "../dzz/tiles.js";
+import { getActiveBasemapTileUrl, toSameOriginDzzUrl } from "../dzz/urls.js";
+import { withTimeout } from "../ui.js";
 
 const DEFAULT_CENTER = [53.9, 27.55];
 const DEFAULT_ZOOM = 13;
@@ -40,45 +40,27 @@ function bindTileLoadIndicator(layer) {
   });
 }
 
-let dzzTileLogCount = 0;
-
-function AuthedTileLayer() {
+function DzzTileLayer() {
   return L.TileLayer.extend({
     createTile(coords, done) {
       const tile = document.createElement("img");
       tile.alt = "";
-      const url = this.getTileUrl(coords);
-      const token = getAccessToken();
-      fetch(url, { headers: token ? { Authorization: `Bearer ${token}` } : {} })
-        .then(async (res) => {
-          if (!res.ok) throw new Error(`tile ${res.status}`);
-          const blob = await res.blob();
-          if (blob.size < 1500) throw new Error(`empty tile ${blob.size}`);
+      const url = toSameOriginDzzUrl(getActiveBasemapTileUrl(coords.z, coords.x, coords.y));
+      dzzEnsureTileBlob(url)
+        .then((blob) => {
+          if (blob.size < 400) throw new Error(`empty tile ${blob.size}`);
           tile.onload = () => {
             if (tile.naturalWidth <= 1 && tile.naturalHeight <= 1) {
-              // #region agent log
-              dbg("C", "dzz-tile-placeholder", { url, w: tile.naturalWidth, h: tile.naturalHeight, size: blob.size });
-              // #endregion
               done(new Error("placeholder tile"), tile);
               return;
             }
-            // #region agent log
-            if (dzzTileLogCount < 6) {
-              dzzTileLogCount += 1;
-              dbg("C", "dzz-tile-ok", { url, size: blob.size, w: tile.naturalWidth, h: tile.naturalHeight, hasToken: !!token });
-            }
-            // #endregion
             done(null, tile);
+            dzzPrefetch(coords);
           };
           tile.onerror = (err) => done(err, tile);
           tile.src = URL.createObjectURL(blob);
         })
-        .catch((err) => {
-          // #region agent log
-          dbg("C", "dzz-tile-fail", { url, error: String(err?.message || err), hasToken: !!token, z: coords?.z, x: coords?.x, y: coords?.y });
-          // #endregion
-          done(err, tile);
-        });
+        .catch((err) => done(err, tile));
       return tile;
     },
   });
@@ -103,8 +85,8 @@ export function initMap() {
     attribution: "OSM",
     crossOrigin: true,
   });
-  const DzzLayer = AuthedTileLayer();
-  tileDzz = new DzzLayer(dzzTileUrl("{z}", "{x}", "{y}"), {
+  const DzzLayer = DzzTileLayer();
+  tileDzz = new DzzLayer("", {
     maxZoom: 22,
     attribution: "dzz.by",
     keepBuffer: 4,
@@ -151,15 +133,15 @@ function updateScale() {
 }
 
 export function setBasemap(kind, customUrl) {
-  // #region agent log
-  dbg("D", "set-basemap", { kind, hasCustom: !!customUrl, hasMap: !!map });
-  // #endregion
   if (!map) return;
   [tileSatellite, tileScheme, tileDzz, tileCustom].forEach((layer) => {
     if (layer && map.hasLayer(layer)) map.removeLayer(layer);
   });
   if (kind === "scheme") tileScheme.addTo(map);
-  else if (kind === "dzz") tileDzz.addTo(map);
+  else if (kind === "dzz") {
+    tileDzz.redraw();
+    tileDzz.addTo(map);
+  }
   else if (kind === "custom" && customUrl) {
     tileCustom = L.tileLayer(customUrl, { ...TILE_OPTS, attribution: "custom", crossOrigin: true });
     bindTileLoadIndicator(tileCustom);
@@ -321,6 +303,12 @@ export function enableAoiDraw(onDone) {
     setAoiBounds(e.layer.getBounds());
     onDone?.(e.layer.getBounds());
   });
+}
+
+export function setDzzCoverageBounds(bounds) {
+  if (!tileDzz) return;
+  tileDzz.options.bounds = bounds || undefined;
+  if (map && map.hasLayer(tileDzz)) tileDzz.redraw();
 }
 
 export function setDzzTileGrid(on) {

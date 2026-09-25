@@ -61,6 +61,8 @@ let refreshPromise = null;
 function isAuthTokenError(payload) {
   const detail = typeof payload?.detail === "string" ? payload.detail : "";
   if (/неверн.*парол/i.test(detail)) return false;
+  if (/учётные данные dzz/i.test(detail)) return false;
+  if (/нет сессии dzz/i.test(detail)) return false;
   if (/user inactive/i.test(detail)) return false;
   return true;
 }
@@ -136,10 +138,10 @@ export function api(path, options) {
   return rawFetch(path, options);
 }
 
-export function apiForm(path, form, method = "POST") {
-  return rawFetch(path, { method, body: form });
+export function apiNoAuth(path, options) {
+  return rawFetch(path, options, { skipAuth: true, skipRefresh: true });
 }
 
-export function dzzTileUrl(z, x, y) {
-  return `/api/v1/dzz/tiles/${z}/${x}/${y}`;
+export function apiForm(path, form, method = "POST") {
+  return rawFetch(path, { method, body: form });
 }

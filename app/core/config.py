@@ -56,8 +56,11 @@ class Settings(BaseSettings):
     mail_from: str = "noreply@agrovision.local"
 
     dzz_default_url: str = (
-        "https://www.dzz.by/arcgis/rest/services/georesursDDZ/Belarus_web_mercator_all/ImageServer"
+        "https://www.dzz.by/arcgis/rest/services/georesursDDZ/Polya_all/ImageServer"
     )
+    dzz_upstream: str = "https://www.dzz.by"
+    dzz_sessions_path: str = "data/dzz-sessions.enc"
+    dzz_session_ttl_hours: int = 8
 
     @field_validator("database_url")
     @classmethod

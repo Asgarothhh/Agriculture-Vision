@@ -2,12 +2,13 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   api,
   clearTokens,
-  dzzTileUrl,
   formatDetail,
   getAccessToken,
   setTokens,
 } from "./client.js";
 import { mapModelCode } from "./tasks.js";
+import { dzzTileUrl, toSameOriginDzzUrl } from "./dzz.js";
+import { DZZ_DEFAULT_SERVICE, getActiveBasemapTileUrl, dzzSession } from "../dzz/urls.js";
 
 afterEach(() => {
   clearTokens();
@@ -46,10 +47,27 @@ describe("mapModelCode", () => {
 });
 
 describe("dzzTileUrl", () => {
-  it("does not put credentials in the tile URL", () => {
-    const url = dzzTileUrl(8, 140, 85);
-    expect(url).toBe("/api/v1/dzz/tiles/8/140/85");
+  it("rewrites dzz.by tiles to the same-origin proxy without credentials", () => {
+    dzzSession.serviceRoot = DZZ_DEFAULT_SERVICE;
+    dzzSession.wmtsTemplate = "";
+    const url = dzzTileUrl(12, 2400, 1309);
+    expect(url).toBe(
+      "/api/v1/dzz/arcgis/rest/services/georesursDDZ/Polya_all/ImageServer/tile/4/1309/2400",
+    );
     expect(url).not.toMatch(/password|login|token=/i);
+    expect(
+      toSameOriginDzzUrl(
+        "https://www.dzz.by/arcgis/rest/services/georesursDDZ/Polya_all/ImageServer/tile/4/1309/2400",
+      ),
+    ).toBe(url);
+  });
+
+  it("uses exportImage outside the cached zoom range", () => {
+    dzzSession.serviceRoot = DZZ_DEFAULT_SERVICE;
+    dzzSession.wmtsTemplate = "";
+    const url = getActiveBasemapTileUrl(8, 140, 85);
+    expect(url).toContain("/exportImage?");
+    expect(toSameOriginDzzUrl(url).startsWith("/api/v1/dzz/arcgis/")).toBe(true);
   });
 });
 

@@ -7,8 +7,7 @@ from sqlalchemy.orm import Session
 
 from app.core.database import SyncSessionLocal, import_all_models
 from app.core.geo import wkb_element
-from app.core.security import encrypt_secret, hash_password
-from app.dzz_service.models import DzzConnection
+from app.core.security import hash_password
 from app.layers_service.models import Folder, Layer, LayerObject
 from app.ml_service.models import CropProbability, ModelRegistry, ObjectClass, PointObject, PolygonObject
 from app.tasks_service.models import Image, ProcessingTask
@@ -264,19 +263,6 @@ def _ensure_agronom_demo(session: Session, user: User) -> None:
                 radius_approx=3.2,
                 area_approx=32.0,
                 confidence=0.91,
-            )
-        )
-
-    dzz = session.scalar(select(DzzConnection).where(DzzConnection.user_id == user.id))
-    if dzz is None:
-        session.add(
-            DzzConnection(
-                user_id=user.id,
-                login_encrypted=encrypt_secret("demo-dzz"),
-                password_encrypted=encrypt_secret("demo-dzz-pass"),
-                service_url="https://dzz.by",
-                is_active=False,
-                last_status="unavailable",
             )
         )
 

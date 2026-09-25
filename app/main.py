@@ -18,7 +18,8 @@ from app.core.config import get_settings
 from app.core.database import async_engine, import_all_models
 from app.core.ratelimit import limiter
 from app.core.seed import seed
-from app.dzz_service.routers import connection_router, proxy_router
+from app.dzz_service.routers import connection_router, proxy_router, wmts_router
+from app.dzz_service.sessions import load_dzz_sessions
 from app.layers_service.routers import folders_router, import_export_router, layers_router, objects_router
 from app.ml_service.routers import router as models_router
 from app.activity_service.routers import router as activity_router
@@ -64,6 +65,10 @@ class RequestContextMiddleware:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     try:
+        load_dzz_sessions()
+    except Exception:
+        logging.getLogger(__name__).exception("dzz session restore failed")
+    try:
         seed()
     except Exception:
         logging.getLogger(__name__).exception("startup seed failed")
@@ -108,6 +113,7 @@ def create_app() -> FastAPI:
     application.include_router(tasks_router, prefix=prefix)
     application.include_router(models_router, prefix=prefix)
     application.include_router(connection_router, prefix=prefix)
+    application.include_router(wmts_router, prefix=prefix)
     application.include_router(proxy_router, prefix=prefix)
 
     @application.get(f"{prefix}/health")

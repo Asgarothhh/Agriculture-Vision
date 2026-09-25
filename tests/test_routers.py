@@ -256,7 +256,7 @@ def test_dzz_routes_do_not_crash(client, auth_headers):
         headers=auth_headers,
         json={"login": "bad", "password": "bad", "service_url": "https://127.0.0.1:1"},
     )
-    assert connect.status_code in {401, 503}
+    assert connect.status_code in {400, 401, 503}
 
 
 def test_tasks_calls_runtime(client, auth_headers, monkeypatch):

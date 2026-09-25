@@ -40,11 +40,14 @@ import {
   startUploadProcessing,
 } from "./tasks/runner.js";
 import {
+  applyWmtsSelection,
   disconnectDzz,
   goToDzzTileFromForm,
   loadWmtsCatalog,
   onBasemapSelectChange,
   onDzzPillClick,
+  onWmtsLayerChange,
+  onWmtsMatrixChange,
   startDzzPolling,
   stopDzzPolling,
   testDzzAccess,
@@ -190,9 +193,6 @@ function setDzzDockMode(mode) {
 function toggleDzzDock() {
   $("dzz-sites-bar")?.classList.toggle("open");
 }
-function applyWmtsSelection() {}
-function onWmtsLayerChange() {}
-function onWmtsMatrixChange() {}
 function handleAvatarFile() {}
 
 function bindUi() {
@@ -252,6 +252,10 @@ function bindUi() {
   $("dzz-wmts-apply-btn")?.addEventListener("click", () => applyWmtsSelection("dzz"));
   $("opt-dzz-wmts-layer")?.addEventListener("change", () => onWmtsLayerChange("dzz"));
   $("opt-dzz-wmts-matrix")?.addEventListener("change", () => onWmtsMatrixChange("dzz"));
+  $("custom-wmts-load-btn")?.addEventListener("click", () => loadWmtsCatalog("custom"));
+  $("custom-wmts-apply-btn")?.addEventListener("click", () => applyWmtsSelection("custom"));
+  $("opt-custom-wmts-layer")?.addEventListener("change", () => onWmtsLayerChange("custom"));
+  $("opt-custom-wmts-matrix")?.addEventListener("change", () => onWmtsMatrixChange("custom"));
   $("dzz-tile-go-opt")?.addEventListener("click", () => goToDzzTileFromForm("opt"));
   $("dzz-tile-go-bar")?.addEventListener("click", () => goToDzzTileFromForm("bar"));
   $("opt-dzz-tile-grid")?.addEventListener("change", (event) => setDzzTileGrid(event.target.checked));

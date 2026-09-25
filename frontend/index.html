@@ -410,10 +410,10 @@
                         <button type="button" class="password-toggle" aria-label="Показать пароль" title="Показать пароль"></button>
                     </div>
                     <div class="settings-block-title">Адрес подключения</div>
-                    <input type="text" id="opt-dzz-url" class="search-input" placeholder="https://www.dzz.by/arcgis/rest/services/georesursDDZ/Belarus_web_mercator_all/ImageServer" value="https://www.dzz.by/arcgis/rest/services/georesursDDZ/Belarus_web_mercator_all/ImageServer">
+                    <input type="text" id="opt-dzz-url" class="search-input" placeholder="https://www.dzz.by/arcgis/rest/services/georesursDDZ/Polya_all/ImageServer" value="https://www.dzz.by/arcgis/rest/services/georesursDDZ/Polya_all/ImageServer">
                     <button type="button" class="mini-btn" id="dzz-test-btn">Проверить подключение</button>
                     <p id="dzz-conn-status" class="panel-hint" style="margin-top:0;"></p>
-                    <p class="panel-hint">Логин и пароль — от портала dzz.by. Если сервис открытый, поля можно оставить пустыми. Затем «Проверить подключение» или кнопка «Подключить dzz.by» в шапке.</p>
+                    <p class="panel-hint">Логин и пароль уходят на сервер один раз при «Проверить подключение» и сразу стираются из поля. Дальше запросы к dzz.by идут только через сервер приложения. Пароль в браузере не хранится.</p>
                     <button type="button" class="mini-btn" id="dzz-logout-btn">Выйти из dzz.by</button>
                     <div class="settings-block-title">WMTS</div>
                     <button type="button" class="mini-btn" id="dzz-wmts-load-btn">Загрузить WMTSCapabilities</button>

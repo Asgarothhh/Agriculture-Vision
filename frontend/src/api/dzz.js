@@ -1,30 +1,42 @@
-import { api, dzzTileUrl } from "./client.js";
+import { apiNoAuth } from "./client.js";
+import { dzzSession, getActiveBasemapTileUrl, toSameOriginDzzUrl } from "../dzz/urls.js";
 
-export function connectDzz({ login, password, service_url }) {
-  return api("/api/v1/dzz/connect", {
+export function connectDzz({ login, password, url, service_url }) {
+  return apiNoAuth("/api/v1/dzz/connect", {
     method: "POST",
-    body: JSON.stringify({ login, password, service_url }),
+    body: JSON.stringify({ login, password, url: url || service_url }),
   });
 }
 
 export function dzzStatus() {
-  return api("/api/v1/dzz/status");
+  return apiNoAuth("/api/v1/dzz/status");
 }
 
 export function dzzCheck() {
-  return api("/api/v1/dzz/check", { method: "POST" });
+  return apiNoAuth("/api/v1/dzz/health");
 }
 
 export function disconnectDzz() {
-  return api("/api/v1/dzz/disconnect", { method: "POST" });
+  return apiNoAuth("/api/v1/dzz/disconnect", { method: "POST" });
 }
 
 export function dzzRegions() {
-  return api("/api/v1/dzz/regions");
+  return apiNoAuth("/api/v1/dzz/regions");
 }
 
-export function dzzCapabilities() {
-  return api("/api/v1/dzz/wmts/capabilities");
+export function dzzSites() {
+  return apiNoAuth("/api/v1/dzz/sites");
 }
 
-export { dzzTileUrl };
+export function dzzCapabilities(body = {}) {
+  return apiNoAuth("/api/v1/wmts/capabilities", {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+}
+
+export function dzzTileUrl(z, x, y) {
+  return toSameOriginDzzUrl(getActiveBasemapTileUrl(z, x, y));
+}
+
+export { dzzSession, toSameOriginDzzUrl };

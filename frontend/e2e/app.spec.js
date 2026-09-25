@@ -268,8 +268,8 @@ test("dzz bad credentials do not leak password in tile URL", async ({ page, requ
   await openApp(page, request);
   expect(page.url()).not.toContain("secret-pass");
   await page.evaluate(() => localStorage.setItem("probe", "secret-pass"));
-  const tileUrl = await page.evaluate(() => `/api/v1/dzz/tiles/8/140/85`);
-  expect(tileUrl).toBe("/api/v1/dzz/tiles/8/140/85");
+  const tileUrl = await page.evaluate(() => `/api/v1/dzz/arcgis/rest/services/georesursDDZ/Polya_all/ImageServer/tile/4/140/85`);
+  expect(tileUrl).toBe("/api/v1/dzz/arcgis/rest/services/georesursDDZ/Polya_all/ImageServer/tile/4/140/85");
   expect(tileUrl).not.toMatch(/password|secret-pass|login=/i);
 });
 

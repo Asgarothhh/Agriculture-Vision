@@ -24,6 +24,17 @@ def _seed_reference_and_demo():
 
 
 @pytest.fixture(autouse=True)
+def _isolate_dzz_sessions(tmp_path, monkeypatch):
+    from app.dzz_service import sessions
+
+    path = tmp_path / "dzz-sessions.enc"
+    monkeypatch.setattr(sessions, "sessions_path", lambda: path)
+    sessions.reset_sessions()
+    yield
+    sessions.reset_sessions()
+
+
+@pytest.fixture(autouse=True)
 def _disable_auth_rate_limit():
     from app.core.ratelimit import limiter
 
@@ -45,7 +56,7 @@ def _stub_ml_load(monkeypatch):
         runtime._errors = {}
         return runtime.health()
 
-    monkeypatch.setattr("app.main.load_models", fake_load)
+    monkeypatch.setattr("app.main.load_models", fake_load, raising=False)
     monkeypatch.setattr("app.ml_service.runtime.load_models", fake_load)
     monkeypatch.setattr(runtime, "load_models", fake_load)
     fake_load()

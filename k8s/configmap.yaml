@@ -17,5 +17,8 @@ data:
   CORS_ORIGINS: "http://localhost,http://localhost:80,http://localhost:30080,http://127.0.0.1,http://127.0.0.1:80,http://127.0.0.1:30080"
   YOLO_WEIGHTS_PATH: "/app/config/yolo_best.pt"
   SEGFORMER_WEIGHTS_PATH: "/app/config/segformer_best.pt"
+  DZZ_DEFAULT_URL: "https://www.dzz.by/arcgis/rest/services/georesursDDZ/Polya_all/ImageServer"
+  DZZ_UPSTREAM: "https://www.dzz.by"
+  DZZ_SESSIONS_PATH: "data/dzz-sessions.enc"
   HF_HOME: "/app/.cache/huggingface"
   TRANSFORMERS_CACHE: "/app/.cache/huggingface"
