@@ -12,11 +12,14 @@ COPY alembic ./alembic
 COPY alembic.ini ./
 COPY config ./config
 COPY models ./models
+RUN test -s /app/config/yolo_best.pt && test -s /app/config/segformer_best.pt
 
 RUN pip install --default-timeout=1000 --no-cache-dir -e .
 
 ENV PYTHONUNBUFFERED=1
 ENV HF_HOME=/app/.cache/huggingface
 ENV TRANSFORMERS_CACHE=/app/.cache/huggingface
+ENV YOLO_WEIGHTS_PATH=/app/config/yolo_best.pt
+ENV SEGFORMER_WEIGHTS_PATH=/app/config/segformer_best.pt
 EXPOSE 8000
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--proxy-headers", "--forwarded-allow-ips", "*"]

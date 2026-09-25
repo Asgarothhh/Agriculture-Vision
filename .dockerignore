@@ -1,0 +1,11 @@
+.git
+.venv
+.cursor
+frontend
+**/__pycache__
+**/.pytest_cache
+htmlcov
+data/agvision
+data/uploads
+node_modules
+*.egg-info

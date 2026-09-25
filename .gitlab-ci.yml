@@ -52,8 +52,15 @@ unit-tests:
 build-images:
   stage: build
   needs: []
+  cache:
+    key: agrovision-model-weights
+    paths:
+      - config/yolo_best.pt
+      - config/segformer_best.pt
+    policy: pull-push
   script:
     - minikube status || minikube start --driver=docker --memory=8192 --cpus=4 || (minikube delete --all && minikube start --driver=docker --memory=8192 --cpus=4)
+    - bash deploy/prepare-weights.sh
     - eval "$(minikube docker-env)"
     - docker build -f deploy/Dockerfile.api -t "$API_IMAGE:$CI_COMMIT_SHORT_SHA" .
     - docker build -f deploy/Dockerfile.worker -t "$WORKER_IMAGE:$CI_COMMIT_SHORT_SHA" .
