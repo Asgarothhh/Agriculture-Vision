@@ -75,10 +75,9 @@ deploy-k8s:
       test "$code" != "502" -a "$code" != "000"
   after_script:
     - echo "=== ОТЛАДОЧНАЯ ИНФОРМАЦИЯ ПРИ ОШИБКЕ ==="
-    - kubectl get pods -n "$KUBE_NAMESPACE" -l app=agri-worker
-    - kubectl describe pods -n "$KUBE_NAMESPACE" -l app=agri-worker
-    - kubectl logs -n "$KUBE_NAMESPACE" -l app=agri-worker --all-containers=true --tail=100 || true
-
+    - kubectl get pods -n "$KUBE_NAMESPACE" -l app=agri-api
+    - kubectl describe pods -n "$KUBE_NAMESPACE" -l app=agri-api
+    - kubectl logs -n "$KUBE_NAMESPACE" -l app=agri-api -c migrate || true
   rules:
     - if: '$CI_COMMIT_BRANCH == "dev"'
     - if: '$CI_COMMIT_BRANCH == "main"'
