@@ -73,6 +73,12 @@ deploy-k8s:
       code="$(curl -sS -o /dev/null -w '%{http_code}' -X POST http://127.0.0.1/api/v1/auth/login -H 'Content-Type: application/json' -d '{}' || true)"
       echo "login $code"
       test "$code" != "502" -a "$code" != "000"
+  after_script:
+    - echo "=== ОТЛАДОЧНАЯ ИНФОРМАЦИЯ ПРИ ОШИБКЕ ==="
+    - kubectl get pods -n "$KUBE_NAMESPACE" -l app=agri-worker
+    - kubectl describe pods -n "$KUBE_NAMESPACE" -l app=agri-worker
+    - kubectl logs -n "$KUBE_NAMESPACE" -l app=agri-worker --all-containers=true --tail=100 || true
+
   rules:
     - if: '$CI_COMMIT_BRANCH == "dev"'
     - if: '$CI_COMMIT_BRANCH == "main"'
