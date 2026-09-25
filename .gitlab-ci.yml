@@ -58,6 +58,7 @@ build-images:
     - docker build -f deploy/Dockerfile.api -t $API_IMAGE:$CI_COMMIT_SHORT_SHA .
     - docker build -f deploy/Dockerfile.worker -t $WORKER_IMAGE:$CI_COMMIT_SHORT_SHA .
   rules:
+    - if: '$CI_COMMIT_BRANCH == "main"'
     - if: '$CI_COMMIT_BRANCH == "dev"'
     - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
       changes:
