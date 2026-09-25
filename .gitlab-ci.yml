@@ -70,9 +70,11 @@ deploy-k8s:
     - kubectl get pods -n "$KUBE_NAMESPACE" -o wide
     - kubectl get svc -n "$KUBE_NAMESPACE"
     - kubectl logs -n "$KUBE_NAMESPACE" deploy/agriculture-vision-nginx --tail=40 || true
+    - kubectl exec -n "$KUBE_NAMESPACE" deploy/agriculture-vision-nginx -- wget -qO- http://api:8000/api/v1/health || kubectl exec -n "$KUBE_NAMESPACE" deploy/agriculture-vision-api -- python -c "import urllib.request; print(urllib.request.urlopen('http://127.0.0.1:8000/api/v1/health').read().decode())"
     - chmod +x deploy/refresh-host-nginx.sh
     - bash deploy/refresh-host-nginx.sh
-    - curl -sfI "http://127.0.0.1:30080/" || curl -sfI "http://$(minikube ip):30080/" || true
+    - curl -sf "http://127.0.0.1:8000/api/v1/health"
+    - curl -sf "http://127.0.0.1/api/v1/health" || curl -sf "http://192.168.0.118/api/v1/health"
   rules:
     - if: '$CI_COMMIT_BRANCH == "dev"'
     - if: '$CI_COMMIT_BRANCH == "main"'

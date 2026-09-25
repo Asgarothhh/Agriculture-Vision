@@ -14,7 +14,7 @@ data:
   DATABASE_SYNC_URL: "postgresql://developer:developer@postgres-service:5432/agriculture-vision"
   REDIS_URL: "redis://redis-service:6379/0"
   CELERY_BROKER_URL: "redis://redis-service:6379/0"
-  CORS_ORIGINS: "http://localhost,http://localhost:80,http://localhost:30080,http://127.0.0.1,http://127.0.0.1:80,http://127.0.0.1:30080"
+  CORS_ORIGINS: "http://localhost,http://localhost:80,http://localhost:30080,http://127.0.0.1,http://127.0.0.1:80,http://127.0.0.1:30080,http://192.168.0.118"
   YOLO_WEIGHTS_PATH: "/app/config/yolo_best.pt"
   SEGFORMER_WEIGHTS_PATH: "/app/config/segformer_best.pt"
   DZZ_DEFAULT_URL: "https://www.dzz.by/arcgis/rest/services/georesursDDZ/Polya_all/ImageServer"
