@@ -79,10 +79,11 @@ metadata:
   name: api
   namespace: ml-service
 spec:
-  type: ClusterIP
+  type: NodePort
   ports:
     - port: 8000
       targetPort: 8000
+      nodePort: 30800
       name: http
   selector:
     app: agri-api

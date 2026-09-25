@@ -18,7 +18,7 @@ build-images:
       - config/segformer_best.pt
     policy: pull-push
   script:
-    - minikube status || minikube start --driver=docker --memory=8192 --cpus=4 --ports=8000:8000 --ports=30080:30080 || (minikube delete --all && minikube start --driver=docker --memory=8192 --cpus=4 --ports=8000:8000 --ports=30080:30080)
+    - minikube status || minikube start --driver=docker --memory=8192 --cpus=4 || (minikube delete --all && minikube start --driver=docker --memory=8192 --cpus=4)
     - eval "$(minikube docker-env)"
     - bash deploy/prepare-weights.sh
     - docker build -f deploy/Dockerfile.api -t "$API_IMAGE:$CI_COMMIT_SHORT_SHA" .
@@ -48,14 +48,11 @@ deploy-k8s:
   stage: deploy
   needs: ["build-images"]
   script:
-    - eval "$(minikube docker-env)"
     - kubectl apply -f k8s/namespace-and-quota.yaml
     - kubectl apply -f k8s/configmap.yaml
     - kubectl apply -f k8s/postgres.yaml
     - kubectl apply -f k8s/redis.yaml
     - kubectl rollout status deployment/postgres-deployment -n "$KUBE_NAMESPACE" --timeout=180s
-
-
     - tmpdir="$(mktemp -d)"
     - sed "s|API_IMAGE_PLACEHOLDER|$API_IMAGE:$CI_COMMIT_SHORT_SHA|g" k8s/api-deployment.yaml > "$tmpdir/api.yaml"
     - sed "s|WORKER_IMAGE_PLACEHOLDER|$WORKER_IMAGE:$CI_COMMIT_SHORT_SHA|g" k8s/worker-deployment.yaml > "$tmpdir/worker.yaml"
@@ -69,12 +66,10 @@ deploy-k8s:
     - kubectl rollout status deployment/agriculture-vision-nginx -n "$KUBE_NAMESPACE" --timeout=120s
     - kubectl get pods -n "$KUBE_NAMESPACE" -o wide
     - kubectl get svc -n "$KUBE_NAMESPACE"
-    - kubectl logs -n "$KUBE_NAMESPACE" deploy/agriculture-vision-nginx --tail=40 || true
-    - kubectl exec -n "$KUBE_NAMESPACE" deploy/agriculture-vision-nginx -- wget -qO- http://api:8000/api/v1/health || kubectl exec -n "$KUBE_NAMESPACE" deploy/agriculture-vision-api -- python -c "import urllib.request; print(urllib.request.urlopen('http://127.0.0.1:8000/api/v1/health').read().decode())"
+    - curl -sf "http://$(minikube ip):30800/api/v1/health"
     - chmod +x deploy/refresh-host-nginx.sh
     - bash deploy/refresh-host-nginx.sh
-    - curl -sf "http://127.0.0.1:8000/api/v1/health"
-    - curl -sf "http://127.0.0.1/api/v1/health" || curl -sf "http://192.168.0.118/api/v1/health"
+    - curl -sf "http://127.0.0.1/api/v1/health"
     - code="$(curl -sS -o /dev/null -w '%{http_code}' -X POST http://127.0.0.1/api/v1/auth/login -H 'Content-Type: application/json' -d '{}' || true)"; echo "login $code"; test "$code" != "502" -a "$code" != "000"
   rules:
     - if: '$CI_COMMIT_BRANCH == "dev"'
