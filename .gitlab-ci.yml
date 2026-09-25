@@ -18,7 +18,7 @@ build-images:
       - config/segformer_best.pt
     policy: pull-push
   script:
-    - minikube status || minikube start --driver=docker --memory=8192 --cpus=4 --ports=30080:30080 || (minikube delete --all && minikube start --driver=docker --memory=8192 --cpus=4 --ports=30080:30080)
+    - minikube status || minikube start --driver=docker --memory=8192 --cpus=4 --ports=8000:8000 --ports=30080:30080 || (minikube delete --all && minikube start --driver=docker --memory=8192 --cpus=4 --ports=8000:8000 --ports=30080:30080)
     - eval "$(minikube docker-env)"
     - bash deploy/prepare-weights.sh
     - docker build -f deploy/Dockerfile.api -t "$API_IMAGE:$CI_COMMIT_SHORT_SHA" .
@@ -75,6 +75,7 @@ deploy-k8s:
     - bash deploy/refresh-host-nginx.sh
     - curl -sf "http://127.0.0.1:8000/api/v1/health"
     - curl -sf "http://127.0.0.1/api/v1/health" || curl -sf "http://192.168.0.118/api/v1/health"
+    - code="$(curl -sS -o /dev/null -w '%{http_code}' -X POST http://127.0.0.1/api/v1/auth/login -H 'Content-Type: application/json' -d '{}' || true)"; echo "login $code"; test "$code" != "502" -a "$code" != "000"
   rules:
     - if: '$CI_COMMIT_BRANCH == "dev"'
     - if: '$CI_COMMIT_BRANCH == "main"'
