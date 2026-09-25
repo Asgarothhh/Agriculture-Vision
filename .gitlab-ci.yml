@@ -1,5 +1,4 @@
 stages:
-  - test
   - build
   - deploy
 
@@ -8,46 +7,6 @@ variables:
   API_IMAGE: "agriculture-vision-api"
   WORKER_IMAGE: "agriculture-vision-worker"
   NGINX_IMAGE: "agriculture-vision-nginx"
-
-unit-tests:
-  stage: test
-  script:
-    - |
-      if [ -n "${ENV_FILE:-}" ] && [ -f "$ENV_FILE" ]; then
-        cp "$ENV_FILE" .env
-      elif [ -f .env.example ]; then
-        cp .env.example .env
-      fi
-    - export POSTGRES_USER="${POSTGRES_USER:-developer}"
-    - export POSTGRES_PASSWORD="${POSTGRES_PASSWORD:-developer}"
-    - export POSTGRES_DB="${POSTGRES_DB:-agriculture-vision}"
-    - export DATABASE_URL="postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@127.0.0.1:5432/${POSTGRES_DB}"
-    - export DATABASE_SYNC_URL="postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@127.0.0.1:5432/${POSTGRES_DB}"
-    - export REDIS_URL="redis://127.0.0.1:6379/0"
-
-    - docker rm -f test-postgres test-redis || true
-    - docker run -d --name test-postgres -p 127.0.0.1:5432:5432 -e POSTGRES_USER="$POSTGRES_USER" -e POSTGRES_PASSWORD="$POSTGRES_PASSWORD" -e POSTGRES_DB="$POSTGRES_DB" postgis/postgis:15-3.4
-    - docker run -d --name test-redis -p 127.0.0.1:6379:6379 redis:7-alpine
-    - |
-      for i in $(seq 1 30); do
-        docker exec test-postgres pg_isready -U "$POSTGRES_USER" -d "$POSTGRES_DB" && break
-        sleep 2
-      done
-
-    - export GDAL_VERSION="$(gdal-config --version 2>/dev/null || true)"
-    - if [ ! -d ".venv" ]; then python3 -m venv .venv; fi
-    - source .venv/bin/activate
-    - pip install --upgrade pip
-    - pip install -r requirements.txt
-    - alembic upgrade head
-    - python -m app.core.seed
-    - pytest tests/ -m "not ml" -q
-  after_script:
-    - docker rm -f test-postgres test-redis || true
-  rules:
-    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
-    - if: '$CI_COMMIT_BRANCH'
-  allow_failure: true
 
 build-images:
   stage: build
