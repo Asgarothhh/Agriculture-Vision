@@ -380,7 +380,12 @@ def test_delete_fresh_account_removes_user_row(client, db_session):
     )
     assert register.status_code == 200, register.text
     headers = {"Authorization": f"Bearer {register.json()['access_token']}"}
-    deleted = client.delete("/api/v1/users/me", headers=headers)
+    deleted = client.request(
+        "DELETE",
+        "/api/v1/users/me",
+        headers={**headers, "Content-Type": "application/json"},
+        content=json.dumps({"password": DEMO_PASSWORD}),
+    )
     assert deleted.status_code == 204
     db_session.expire_all()
     assert db_session.scalar(select(User).where(User.username == email)) is None

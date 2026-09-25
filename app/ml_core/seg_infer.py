@@ -11,6 +11,7 @@ import torch
 import torch.nn.functional as F
 
 from ml_core.train_seg import Segformer4ChWrapper
+from ml_core.seg_remap import remap_segformer_state_dict
 
 # TTA flip по H,W для NCHW: () = без отражения
 _TTA_FLIPS: tuple[tuple[int, ...], ...] = ((), (2,), (3,), (2, 3))
@@ -18,6 +19,24 @@ _TTA_FLIPS: tuple[tuple[int, ...], ...] = ((), (2,), (3,), (2, 3))
 
 def _apply_tta_flip(x: torch.Tensor, dims: tuple[int, ...]) -> torch.Tensor:
     return x if not dims else x.flip(dims)
+
+
+def _inflate_first_conv_3ch_to_4ch(state: dict[str, Any]) -> dict[str, Any]:
+    """Чекпоинт с RGB (3ch) кладём в 4ch обёртку: NIR = среднее RGB."""
+    out = dict(state)
+    for key, tensor in list(out.items()):
+        if (
+            key.endswith("patch_embeddings.proj.weight")
+            and getattr(tensor, "ndim", 0) == 4
+            and tensor.shape[1] == 3
+        ):
+            w = tensor.new_zeros((tensor.shape[0], 4, tensor.shape[2], tensor.shape[3]))
+            w[:, 0] = tensor.mean(dim=1)
+            w[:, 1] = tensor[:, 0]
+            w[:, 2] = tensor[:, 1]
+            w[:, 3] = tensor[:, 2]
+            out[key] = w
+    return out
 
 
 def load_segformer_checkpoint(
@@ -33,7 +52,28 @@ def load_segformer_checkpoint(
     seg_cfg = cfg.get("segmentation", {})
     model_id = seg_cfg.get("model_id", "nvidia/segformer-b4-finetuned-ade-512-512")
     model = Segformer4ChWrapper(model_id, num_labels=seg_cfg.get("num_labels", 2))
-    model.load_state_dict(ckpt["model_state"])
+    raw_state = ckpt["model_state"]
+    target_keys = set(model.state_dict().keys())
+    state = remap_segformer_state_dict(raw_state, target_keys)
+    state = _inflate_first_conv_3ch_to_4ch(state)
+    # #region agent log
+    try:
+        import json as _json, time as _time
+        proj = next((k for k in state if k.endswith("patch_embeddings.proj.weight")), None)
+        with open("/home/asgaroth/Projects/Agriculture-Vision/Agriculture-Vision/.cursor/debug-14c4e4.log", "a") as _f:
+            _f.write(_json.dumps({"sessionId":"14c4e4","hypothesisId":"D","location":"seg_infer.py:load_segformer_checkpoint","message":"proj shapes before load_state_dict","data":{"ckpt_proj":list(raw_state.get(proj).shape) if proj and proj in raw_state else None,"adapted_proj":list(state.get(proj).shape) if proj and proj in state else None,"model_proj":list(model.state_dict()[proj].shape) if proj and proj in model.state_dict() else None},"timestamp":int(_time.time()*1000)})+"\n")
+    except Exception:
+        pass
+    # #endregion
+    incompatible = model.load_state_dict(state, strict=False)
+    missing = list(incompatible.missing_keys)
+    unexpected = list(incompatible.unexpected_keys)
+    if missing:
+        raise RuntimeError(
+            "SegFormer checkpoint does not match runtime architecture. "
+            f"missing={len(missing)} unexpected={len(unexpected)} "
+            f"sample_missing={missing[:8]}"
+        )
     model.to(device)
     model.eval()
     meta = {

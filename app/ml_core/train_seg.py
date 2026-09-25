@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import argparse
+import logging
+import os
 from pathlib import Path
 from typing import Any
 
@@ -13,14 +15,39 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 from transformers import SegformerConfig, SegformerForSemanticSegmentation
 
-from ml_core.agvision_augment import build_train_transform
-from ml_core.agvision_dataset import AgVisionDataset, collate_segformer_batch
 from ml_core.config_loader import load_config, project_root
 from ml_core.metrics import (
     compare_to_tz_targets,
     evaluate_masks_masked,
     save_metrics_report,
 )
+from ml_core.seg_remap import remap_segformer_state_dict
+from ml_core.seg_remap import remap_segformer_state_dict
+
+logger = logging.getLogger(__name__)
+
+
+def segformer_b4_config(num_labels: int = 2) -> SegformerConfig:
+    labels = {str(i): name for i, name in enumerate(("background", "boundary")[:num_labels])}
+    return SegformerConfig(
+        num_channels=3,
+        num_encoder_blocks=4,
+        depths=[3, 8, 27, 3],
+        sr_ratios=[8, 4, 2, 1],
+        hidden_sizes=[64, 128, 320, 512],
+        patch_sizes=[7, 3, 3, 3],
+        strides=[4, 2, 2, 2],
+        num_attention_heads=[1, 2, 5, 8],
+        mlp_ratios=[4, 4, 4, 4],
+        hidden_dropout_prob=0.0,
+        attention_probs_dropout_prob=0.0,
+        classifier_dropout_prob=0.1,
+        decoder_hidden_size=768,
+        num_labels=num_labels,
+        id2label=labels,
+        label2id={v: int(k) for k, v in labels.items()},
+        semantic_loss_ignore_index=255,
+    )
 
 
 def _amp_autocast(enabled: bool):
@@ -79,16 +106,23 @@ def expand_segformer_to_4ch(model: SegformerForSemanticSegmentation) -> None:
 
 
 def load_segformer_binary(model_id: str, num_labels: int = 2) -> SegformerForSemanticSegmentation:
-    """SegFormer с 2 классами без конфликта id2label (ADE=150)."""
-    config = SegformerConfig.from_pretrained(model_id)
+    """SegFormer с 2 классами. Архитектура из конфига, без ADE-150 весов с Hub."""
+    config = None
+    offline = os.environ.get("HF_HUB_OFFLINE", "").strip().lower() in {"1", "true", "yes"}
+    try:
+        config = SegformerConfig.from_pretrained(model_id, local_files_only=True)
+    except Exception:
+        if not offline:
+            try:
+                config = SegformerConfig.from_pretrained(model_id)
+            except Exception as exc:
+                logger.warning("SegFormer config from Hub failed (%s); using built-in B4", exc)
+    if config is None:
+        config = segformer_b4_config(num_labels)
     config.num_labels = num_labels
     config.id2label = {str(i): ("background", "boundary")[i] for i in range(num_labels)}
-    config.label2id = {v: k for k, v in config.id2label.items()}
-    return SegformerForSemanticSegmentation.from_pretrained(
-        model_id,
-        config=config,
-        ignore_mismatched_sizes=True,
-    )
+    config.label2id = {v: int(k) for k, v in config.id2label.items()}
+    return SegformerForSemanticSegmentation(config)
 
 
 class Segformer4ChWrapper(torch.nn.Module):
@@ -235,6 +269,9 @@ def train(
     *,
     data_root: Path | None = None,
 ) -> Path:
+    from ml_core.agvision_augment import build_train_transform
+    from ml_core.agvision_dataset import AgVisionDataset, collate_segformer_batch
+
     root = project_root()
     data_cfg = config["data"]
     seg_cfg = config["segmentation"]
@@ -309,7 +346,10 @@ def train(
     best_iou = -1.0
     if seg_cfg.get("resume", False) and best_path.is_file():
         ckpt = torch.load(best_path, map_location=device, weights_only=False)
-        model.load_state_dict(ckpt["model_state"])
+        model.load_state_dict(
+            remap_segformer_state_dict(ckpt["model_state"], set(model.state_dict())),
+            strict=False,
+        )
         start_epoch = int(ckpt.get("epoch", 0)) + 1
         best_iou = float(ckpt.get("val_metrics", {}).get("iou_mean", -1.0))
         print(f"Resume from {best_path}, epoch {start_epoch}, best_iou={best_iou:.4f}")
@@ -436,7 +476,10 @@ def train(
 
     # Финальный отчёт
     ckpt = torch.load(best_path, map_location=device, weights_only=False)
-    model.load_state_dict(ckpt["model_state"])
+    model.load_state_dict(
+        remap_segformer_state_dict(ckpt["model_state"], set(model.state_dict())),
+        strict=False,
+    )
     # финальный val на полном наборе (без лимита max_val_samples)
     full_val_ds = AgVisionDataset(
         data_root,

@@ -59,6 +59,9 @@ export function patchMe(payload) {
   });
 }
 
-export function deleteMe() {
-  return api("/api/v1/users/me", { method: "DELETE" });
+export function deleteMe(password) {
+  return api("/api/v1/users/me", {
+    method: "DELETE",
+    body: JSON.stringify({ password }),
+  });
 }

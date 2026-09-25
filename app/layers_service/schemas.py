@@ -48,6 +48,7 @@ class ObjectUpdate(BaseModel):
 
 class MergeRequest(BaseModel):
     object_ids: list[UUID] = Field(min_length=2)
+    geom: dict[str, Any] | None = None
 
 
 class ExportRequest(BaseModel):

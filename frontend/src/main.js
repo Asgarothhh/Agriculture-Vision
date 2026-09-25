@@ -9,23 +9,28 @@ import {
   setAuthCallbacks,
   toggleMode,
 } from "./auth/session.js";
-import { bindPasswordToggles, closeAppModal, $, showToast } from "./ui.js";
+import { bindPasswordToggles, closeAppModal, $, showToast, dbg } from "./ui.js";
 import {
-  bindMapClicksForDetails,
-  cancelMergeMode,
-  confirmMergePolygons,
+  applyDisplaySettings,
+  applyLiveStyles,
   createFolder,
   filterLayers,
   importLayerFile,
   loadMapData,
+  onFieldCropSelect,
+  populateCropSelect,
+  restoreDisplaySettings,
   saveFieldName,
   startAoiSelection,
   startCreateArea,
+  startPolygonArea,
   startMergePolygonsMode,
   toggleCreateLayerForm,
 } from "./layers/store.js";
-import { clearAoi, initMap, setBasemap } from "./map/map.js";
-import { activateMapTool } from "./map/tools.js";
+import { clearAoi, initMap, setBasemap, setDzzTileGrid } from "./map/map.js";
+import { activateMapTool, cancelMergeMode, finishEditAreaMode, mergeSelectedPair, openEditAreaMode, setEditDrawMode } from "./map/tools.js";
+import { bindHotkeys, bindSidebarResize } from "./map/hotkeys.js";
+import { redoLast, undoLast } from "./map/undo.js";
 import {
   handleUploadFile,
   onSegArchitectureChange,
@@ -39,6 +44,7 @@ import {
   goToDzzTileFromForm,
   loadWmtsCatalog,
   onBasemapSelectChange,
+  onDzzPillClick,
   startDzzPolling,
   stopDzzPolling,
   testDzzAccess,
@@ -46,7 +52,31 @@ import {
 import { exportLayers } from "./export/download.js";
 import { deleteAccount, renderHistoryFeed, saveProfile } from "./account/profile.js";
 
+function toggleSidebarPanel() {
+  const wrap = $("sidebar-panel-wrap");
+  wrap?.classList.toggle("collapsed");
+  $("sidebar-panel")?.classList.toggle("collapsed");
+  const collapsed = wrap?.classList.contains("collapsed");
+  const btn = $("sidebar-edge-toggle");
+  if (btn) {
+    btn.setAttribute("aria-expanded", collapsed ? "false" : "true");
+    btn.title = collapsed ? "Показать панель" : "Свернуть панель";
+  }
+  setTimeout(() => initMap()?.invalidateSize(), 220);
+}
+
 function switchSidebar(name) {
+  const wrap = $("sidebar-panel-wrap");
+  if (wrap?.classList.contains("collapsed")) {
+    wrap.classList.remove("collapsed");
+    $("sidebar-panel")?.classList.remove("collapsed");
+    const btn = $("sidebar-edge-toggle");
+    if (btn) {
+      btn.setAttribute("aria-expanded", "true");
+      btn.title = "Свернуть панель";
+    }
+    setTimeout(() => initMap()?.invalidateSize(), 220);
+  }
   document.querySelectorAll(".sidebar-icons .icon-btn[data-panel]").forEach((btn) => {
     btn.classList.toggle("active", btn.dataset.panel === name);
   });
@@ -64,10 +94,6 @@ function switchMainTab(name) {
   if (name === "map") setTimeout(() => initMap().invalidateSize(), 50);
 }
 
-function toggleSidebarPanel() {
-  $("sidebar-panel-wrap")?.classList.toggle("collapsed");
-}
-
 function toggleSegPanel() {
   $("map-seg-panel")?.classList.toggle("collapsed");
 }
@@ -75,55 +101,24 @@ function toggleSegPanel() {
 function toggleMoreMenu(event) {
   event?.stopPropagation();
   $("more-menu")?.classList.toggle("active");
-  positionMoreMenu();
 }
 
-function positionMoreMenu() {
-  const menu = $("more-menu");
-  const stack = document.querySelector(".map-right-stack");
-  if (!menu || !stack || !menu.classList.contains("active")) return;
-  const box = stack.getBoundingClientRect();
-  menu.style.top = `${Math.max(12, box.top)}px`;
-  menu.style.right = `${Math.max(12, window.innerWidth - box.left + 10)}px`;
-  menu.style.left = "auto";
+function toggleMoreMenuBody() {
+  $("more-menu")?.classList.toggle("collapsed");
 }
 
 function setTool(name) {
-  document.querySelectorAll(".tool-btn").forEach((btn) => {
-    btn.classList.toggle("active", btn.dataset.tool === name);
-  });
-  const mapArea = $("map-area");
-  if (mapArea) {
-    mapArea.classList.remove("tool-select", "tool-ruler", "tool-compass", "tool-text", "tool-freehand", "tool-brush", "tool-eraser");
-    if (name) mapArea.classList.add(`tool-${name}`);
-  }
   activateMapTool(name);
-}
-
-window.addEventListener("resize", positionMoreMenu);
-
-function toggleHistoryFilterMenu() {
-  const menu = $("history-filter-menu");
-  menu.style.display = menu.style.display === "none" ? "block" : "none";
-}
-
-function toggleHistoryFilterAll(checked) {
-  document.querySelectorAll(".history-filter-cat").forEach((el) => {
-    el.checked = checked;
-  });
-  renderHistoryFeed();
-}
-
-function onHistoryFilterCatChange() {
-  const cats = [...document.querySelectorAll(".history-filter-cat")];
-  $("history-filter-all").checked = cats.every((el) => el.checked);
-  renderHistoryFeed();
 }
 
 async function onAppReady() {
   initMap();
+  bindHotkeys();
+  bindSidebarResize();
+  restoreDisplaySettings();
+  activateMapTool("select");
   await loadMapData();
-  bindMapClicksForDetails();
+  populateCropSelect();
   await refreshMlHealth();
   startDzzPolling();
   const savedArch = localStorage.getItem("ttz_ml_architecture");
@@ -135,6 +130,11 @@ async function onAppReady() {
   if (savedThr && $("seg-threshold")) {
     $("seg-threshold").value = savedThr;
     $("seg-threshold-value").innerText = `${savedThr}%`;
+  }
+  const savedMap = localStorage.getItem("ttz_basemap");
+  if (savedMap) {
+    if ($("opt-basemap")) $("opt-basemap").value = savedMap;
+    setBasemap(savedMap);
   }
 }
 
@@ -150,49 +150,28 @@ function closeFolderPicker() {
 
 function saveSettings() {
   const value = $("opt-basemap")?.value;
-  if (value && value !== "custom") setBasemap(value);
+  localStorage.setItem("ttz_basemap", value || "satellite");
+  if (value === "custom") {
+    const url = $("opt-custom-basemap-url")?.value.trim();
+    if (!url) {
+      showToast("Укажите URL подложки", true);
+      return;
+    }
+    setBasemap("custom", url);
+  } else if (value && value !== "dzz") setBasemap(value);
+  applyDisplaySettings();
   showToast("Настройки сохранены");
 }
 
-function undoLast() {
-  showToast("Отмена: правки сохраняются на сервере");
-}
-
-function redoLast() {}
-
-function openEditAreaMode() {
-  $("edit-area-controls").style.display = "block";
-  $("more-menu")?.classList.add("active");
-  positionMoreMenu();
-  setEditDrawMode("brush");
-}
-
-function finishEditAreaMode() {
-  $("edit-area-controls").style.display = "none";
-  $("map-area")?.classList.remove("tool-freehand", "tool-brush", "tool-eraser");
-  activateMapTool("select");
-}
-
-function setEditDrawMode(mode) {
-  $("edit-brush-btn")?.classList.toggle("active", mode === "brush");
-  $("edit-eraser-btn")?.classList.toggle("active", mode === "eraser");
-  const mapArea = $("map-area");
-  mapArea?.classList.add("tool-freehand");
-  mapArea?.classList.toggle("tool-brush", mode === "brush");
-  mapArea?.classList.toggle("tool-eraser", mode === "eraser");
-  activateMapTool(mode);
-}
-function onDrawLayerSelect() {}
 function toggleLayerGroup(id) {
   $(id)?.classList.toggle("collapsed");
 }
 function toggleFieldDetailPanel() {
   $("field-detail-body")?.classList.toggle("collapsed");
 }
-function setMapDisplayOption() {}
-function onFieldCropSelect() {}
-function setDzzTileGrid() {}
-function toggleDzzTileGrid() {}
+function setMapDisplayOption(key, checked) {
+  localStorage.setItem(key === "labels" ? "ttz_field_labels" : "ttz_field_coords", checked ? "1" : "0");
+}
 function shiftDzzTile(dx, dy) {
   const source = $("dzz-bar-z") ? "bar" : "opt";
   const zEl = $(source === "bar" ? "dzz-bar-z" : "opt-dzz-tile-z");
@@ -201,7 +180,7 @@ function shiftDzzTile(dx, dy) {
   if (!xEl || !yEl) return;
   xEl.value = String(Number(xEl.value || 0) + dx);
   yEl.value = String(Number(yEl.value || 0) + dy);
-  if (zEl && !zEl.value) zEl.value = "8";
+  if (zEl && !zEl.value) zEl.value = "13";
   goToDzzTileFromForm(source);
 }
 function setDzzDockMode(mode) {
@@ -254,15 +233,20 @@ function bindUi() {
   $("upload-process-btn")?.addEventListener("click", startUploadProcessing);
   $("opt-point-size")?.addEventListener("input", (event) => {
     $("point-size-value").innerText = event.target.value;
+    applyLiveStyles();
   });
   $("opt-line-width")?.addEventListener("input", (event) => {
     $("line-width-value").innerText = event.target.value;
+    applyLiveStyles();
   });
   $("opt-fill-opacity")?.addEventListener("input", (event) => {
     $("fill-opacity-value").innerText = event.target.value;
+    applyLiveStyles();
   });
   $("opt-basemap")?.addEventListener("change", (event) => onBasemapSelectChange(event.target.value));
   $("dzz-test-btn")?.addEventListener("click", testDzzAccess);
+  $("status-dzz")?.addEventListener("click", onDzzPillClick);
+  $("dzz-connect-btn")?.addEventListener("click", onDzzPillClick);
   $("dzz-logout-btn")?.addEventListener("click", disconnectDzz);
   $("dzz-wmts-load-btn")?.addEventListener("click", () => loadWmtsCatalog("dzz"));
   $("dzz-wmts-apply-btn")?.addEventListener("click", () => applyWmtsSelection("dzz"));
@@ -271,10 +255,6 @@ function bindUi() {
   $("dzz-tile-go-opt")?.addEventListener("click", () => goToDzzTileFromForm("opt"));
   $("dzz-tile-go-bar")?.addEventListener("click", () => goToDzzTileFromForm("bar"));
   $("opt-dzz-tile-grid")?.addEventListener("change", (event) => setDzzTileGrid(event.target.checked));
-  $("custom-wmts-load-btn")?.addEventListener("click", () => loadWmtsCatalog("custom"));
-  $("custom-wmts-apply-btn")?.addEventListener("click", () => applyWmtsSelection("custom"));
-  $("opt-custom-wmts-layer")?.addEventListener("change", () => onWmtsLayerChange("custom"));
-  $("opt-custom-wmts-matrix")?.addEventListener("change", () => onWmtsMatrixChange("custom"));
   $("save-settings-btn")?.addEventListener("click", saveSettings);
   $("export-btn")?.addEventListener("click", exportLayers);
   $("sidebar-edge-toggle")?.addEventListener("click", toggleSidebarPanel);
@@ -293,14 +273,34 @@ function bindUi() {
     btn.addEventListener("click", () => setTool(btn.dataset.tool));
   });
   $("tool-more-btn")?.addEventListener("click", toggleMoreMenu);
-  $("more-menu-toggle")?.addEventListener("click", toggleMoreMenu);
-  $("create-area-item")?.addEventListener("click", startCreateArea);
-  $("edit-area-item")?.addEventListener("click", openEditAreaMode);
-  $("merge-menu-item")?.addEventListener("click", startMergePolygonsMode);
-  $("merge-confirm-btn")?.addEventListener("click", confirmMergePolygons);
-  $("merge-cancel-btn")?.addEventListener("click", cancelMergeMode);
-  $("draw-layer-select")?.addEventListener("change", (event) => onDrawLayerSelect(event.target.value));
+  $("more-menu-toggle")?.addEventListener("click", (event) => {
+    event.stopPropagation();
+    toggleMoreMenuBody();
+  });
+  $("create-area-item")?.addEventListener("click", (event) => {
+    event.stopPropagation();
+    startCreateArea();
+  });
+  $("polygon-area-item")?.addEventListener("click", (event) => {
+    event.stopPropagation();
+    startPolygonArea();
+  });
+  $("edit-area-item")?.addEventListener("click", (event) => {
+    event.stopPropagation();
+    openEditAreaMode();
+  });
+  $("merge-menu-item")?.addEventListener("click", (event) => {
+    event.stopPropagation();
+    startMergePolygonsMode();
+  });
+  $("merge-confirm-btn")?.addEventListener("click", () => {
+    mergeSelectedPair();
+  });
+  $("merge-cancel-btn")?.addEventListener("click", () => {
+    cancelMergeMode();
+  });
   $("edit-brush-btn")?.addEventListener("click", () => setEditDrawMode("brush"));
+  $("edit-polygon-btn")?.addEventListener("click", () => setEditDrawMode("polygon"));
   $("edit-eraser-btn")?.addEventListener("click", () => setEditDrawMode("eraser"));
   $("brush-size")?.addEventListener("input", (event) => {
     $("brush-size-value").innerText = event.target.value;
@@ -311,22 +311,37 @@ function bindUi() {
   $("dzz-dock-summary")?.addEventListener("click", toggleDzzDock);
   $("dzz-dock-toggle")?.addEventListener("click", toggleDzzDock);
   $("dzz-exit-normal-map")?.addEventListener("click", disconnectDzz);
-  $("dzz-grid-toggle")?.addEventListener("click", toggleDzzTileGrid);
+  $("dzz-grid-toggle")?.addEventListener("click", () => {
+    const on = $("opt-dzz-tile-grid");
+    if (on) on.checked = !on.checked;
+    setDzzTileGrid(!!on?.checked);
+  });
   const shiftMap = { Север: [0, -1], Запад: [-1, 0], Восток: [1, 0], Юг: [0, 1] };
   document.querySelectorAll(".dzz-tile-nav button, .dzz-tile-nav-settings button").forEach((btn) => {
     const delta = shiftMap[btn.getAttribute("title")];
     if (delta) btn.addEventListener("click", () => shiftDzzTile(...delta));
   });
-  $("history-filter-btn")?.addEventListener("click", toggleHistoryFilterMenu);
-  $("history-filter-all")?.addEventListener("change", (event) => toggleHistoryFilterAll(event.target.checked));
+  $("history-filter-btn")?.addEventListener("click", () => {
+    const menu = $("history-filter-menu");
+    menu.style.display = menu.style.display === "none" ? "block" : "none";
+  });
+  $("history-filter-all")?.addEventListener("change", (event) => {
+    document.querySelectorAll(".history-filter-cat").forEach((el) => {
+      el.checked = event.target.checked;
+    });
+    renderHistoryFeed();
+  });
   document.querySelectorAll(".history-filter-cat").forEach((el) => {
-    el.addEventListener("change", onHistoryFilterCatChange);
+    el.addEventListener("change", () => {
+      const cats = [...document.querySelectorAll(".history-filter-cat")];
+      $("history-filter-all").checked = cats.every((c) => c.checked);
+      renderHistoryFeed();
+    });
   });
   $("history-search")?.addEventListener("input", renderHistoryFeed);
   $("history-sort")?.addEventListener("change", renderHistoryFeed);
   $("save-profile-btn")?.addEventListener("click", saveProfile);
   $("delete-account-btn")?.addEventListener("click", deleteAccount);
-  $("avatar-file-input")?.addEventListener("change", (event) => handleAvatarFile(event.target.files?.[0]));
   document.querySelectorAll(".folder-picker-backdrop").forEach((el) => {
     el.addEventListener("click", () => {
       if (el.parentElement?.id === "app-modal") closeAppModal();
@@ -338,6 +353,44 @@ function bindUi() {
 
 bindPasswordToggles();
 bindUi();
+bindHotkeys();
+
+// #region agent log
+document.addEventListener(
+  "click",
+  (event) => {
+    const t = event.target?.closest?.("[id], .tool-btn, .icon-btn, button, a, select");
+    if (!t) return;
+    dbg("UI", "click", {
+      id: t.id || "",
+      cls: String(t.className || "").slice(0, 80),
+      text: String(t.textContent || "").replace(/\s+/g, " ").trim().slice(0, 80),
+      tool: t.dataset?.tool,
+      panel: t.dataset?.panel,
+      mapClass: document.getElementById("map-area")?.className,
+      dzzClass: document.getElementById("status-dzz")?.className,
+      dzzText: document.getElementById("status-dzz")?.textContent,
+      mlText: document.getElementById("status-ml")?.textContent,
+      zoom: document.getElementById("tile-display")?.textContent,
+      sidebar: document.getElementById("sidebar-panel-wrap")?.className,
+    });
+  },
+  true,
+);
+window.addEventListener("error", (event) => {
+  dbg("H3", "window-error", { msg: event.message, src: event.filename, line: event.lineno });
+});
+window.addEventListener("unhandledrejection", (event) => {
+  dbg("H3", "unhandledrejection", { msg: String(event.reason?.message || event.reason || "").slice(0, 200) });
+});
+["prompt", "confirm", "alert"].forEach((name) => {
+  const orig = window[name];
+  window[name] = function (...args) {
+    dbg("H1", `native-${name}`, { args: args.map((a) => String(a).slice(0, 80)) });
+    return orig.apply(this, args);
+  };
+});
+// #endregion
 
 if (!getAccessToken()) {
   document.getElementById("screen-auth").style.display = "";

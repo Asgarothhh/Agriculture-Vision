@@ -62,7 +62,7 @@ describe("api refresh", () => {
           ok: true,
           status: 200,
           headers: new Headers({ "content-type": "application/json" }),
-          json: async () => ({ access_token: "new", refresh_token: "ref2" }),
+          text: async () => JSON.stringify({ access_token: "new", refresh_token: "ref2" }),
         };
       }
       const auth = options.headers.get("Authorization");
@@ -71,19 +71,33 @@ describe("api refresh", () => {
           ok: false,
           status: 401,
           headers: new Headers({ "content-type": "application/json" }),
-          json: async () => ({ detail: "expired" }),
+          text: async () => JSON.stringify({ detail: "expired" }),
         };
       }
       return {
         ok: true,
         status: 200,
         headers: new Headers({ "content-type": "application/json" }),
-        json: async () => ({ ok: true }),
+        text: async () => JSON.stringify({ ok: true }),
       };
     });
     vi.stubGlobal("fetch", fetchMock);
     const result = await api("/api/v1/users/me");
     expect(result).toEqual({ ok: true });
     expect(getAccessToken()).toBe("new");
+  });
+
+  it("does not refresh when password is wrong", async () => {
+    setTokens({ access_token: "old", refresh_token: "ref" }, false);
+    const fetchMock = vi.fn(async () => ({
+      ok: false,
+      status: 401,
+      headers: new Headers({ "content-type": "application/json" }),
+      text: async () => JSON.stringify({ detail: "Неверный пароль" }),
+      json: async () => ({ detail: "Неверный пароль" }),
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+    await expect(api("/api/v1/users/me", { method: "DELETE", body: "{}" })).rejects.toThrow("Неверный пароль");
+    expect(fetchMock.mock.calls.some((call) => String(call[0]).includes("/auth/refresh"))).toBe(false);
   });
 });

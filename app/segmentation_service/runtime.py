@@ -10,7 +10,7 @@ import torch
 
 from ml_core.seg_infer import load_segformer_checkpoint
 from ml_core.train_seg import Segformer4ChWrapper
-from segmentation_service.settings import ModelSettings
+from .settings import ModelSettings
 
 
 class SegmentationRuntime:
@@ -21,7 +21,7 @@ class SegmentationRuntime:
     """
 
     def __init__(self, settings: ModelSettings | None = None) -> None:
-        from segmentation_service.settings import load_settings
+        from .settings import load_settings
 
         self.settings = settings or load_settings()
         self._model: Segformer4ChWrapper | None = None

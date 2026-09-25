@@ -129,7 +129,11 @@
 
                 <div class="input-group">
                     <label>РОЛЬ</label>
-                    <input type="text" id="reg-role" placeholder="ГИС-специалист" required>
+                    <select id="reg-role" class="search-input" required>
+                        <option value="Агроном">Агроном</option>
+                        <option value="Оператор">Оператор</option>
+                        <option value="Администратор">Администратор</option>
+                    </select>
                 </div>
 
                 <div class="input-row">
@@ -189,8 +193,9 @@
         <div class="topbar-right">
             <span class="company-name" title="ООО «ТЕХНОЛОГИИ ЗЕМЛЕДЕЛИЯ» · TTZ">ООО «ТЕХНОЛОГИИ ЗЕМЛЕДЕЛИЯ» · TTZ</span>
             <span class="status-pills">
-                <span class="status-online" id="status-dzz" title="Проверка dzz.by">dzz.by · Онлайн</span>
-                <span class="status-ml" id="status-ml">ML</span>
+                <span class="status-idle" id="status-dzz" title="Нажмите, чтобы подключить dzz.by">dzz.by · Не подключено</span>
+                <button type="button" class="topbar-dzz-btn" id="dzz-connect-btn" title="Настройки и проверка подключения dzz.by">Подключить dzz.by</button>
+                <span class="status-ml status-idle" id="status-ml">ML недоступен</span>
             </span>
             <button class="topbar-logout" type="button" title="Выйти из аккаунта">
                 <svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" stroke-width="2" fill="none" aria-hidden="true"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"></path><polyline points="16 17 21 12 16 7"></polyline><line x1="21" y1="12" x2="9" y2="12"></line></svg>
@@ -243,13 +248,18 @@
                 <div class="layer-group">
                     <div class="layer-group-title layer-group-toggle">
                         <span>КАТЕГОРИИ ОБЪЕКТОВ</span>
-                        <span class="badge" id="layers-count-badge">0 полигонов</span>
+                        <span class="badge" id="layers-count-badge">0 объектов</span>
                         <span class="collapse-icon" id="categories-group-icon">▾</span>
                     </div>
                     <div id="categories-group">
-                    <div id="folders-list"></div>
                     <div id="layers-list"></div>
                     </div>
+                </div>
+
+                <div class="layer-group">
+                    <div class="layer-group-title">МОИ СЛОИ</div>
+                    <div id="folders-list"></div>
+                    <div id="user-layers-list"></div>
                 </div>
 
                 <label class="settings-toggle map-display-toggle">
@@ -400,9 +410,10 @@
                         <button type="button" class="password-toggle" aria-label="Показать пароль" title="Показать пароль"></button>
                     </div>
                     <div class="settings-block-title">Адрес подключения</div>
-                    <input type="text" id="opt-dzz-url" class="search-input" placeholder="https://www.dzz.by/arcgis/rest/services/georesursDDZ/Polya_all/ImageServer" value="https://www.dzz.by/arcgis/rest/services/georesursDDZ/Polya_all/ImageServer/tile/{z}/{y}/{x}">
+                    <input type="text" id="opt-dzz-url" class="search-input" placeholder="https://www.dzz.by/arcgis/rest/services/georesursDDZ/Belarus_web_mercator_all/ImageServer" value="https://www.dzz.by/arcgis/rest/services/georesursDDZ/Belarus_web_mercator_all/ImageServer">
                     <button type="button" class="mini-btn" id="dzz-test-btn">Проверить подключение</button>
                     <p id="dzz-conn-status" class="panel-hint" style="margin-top:0;"></p>
+                    <p class="panel-hint">Логин и пароль — от портала dzz.by. Если сервис открытый, поля можно оставить пустыми. Затем «Проверить подключение» или кнопка «Подключить dzz.by» в шапке.</p>
                     <button type="button" class="mini-btn" id="dzz-logout-btn">Выйти из dzz.by</button>
                     <div class="settings-block-title">WMTS</div>
                     <button type="button" class="mini-btn" id="dzz-wmts-load-btn">Загрузить WMTSCapabilities</button>
@@ -581,6 +592,11 @@
                     Создать область
                     <small>Обрисовать полигон от руки (как freehand в QGIS)</small>
                 </div>
+                <div class="more-menu-item" id="polygon-area-item">
+                    <svg class="menu-icon-svg" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" aria-hidden="true"><polygon points="5 4 19 8 16 20 4 15"></polygon><circle cx="5" cy="4" r="1.6" fill="currentColor"></circle><circle cx="19" cy="8" r="1.6" fill="currentColor"></circle><circle cx="16" cy="20" r="1.6" fill="currentColor"></circle><circle cx="4" cy="15" r="1.6" fill="currentColor"></circle></svg>
+                    Полигон по точкам
+                    <small>Прямые отрезки: кликайте вершины (точки на концах). Enter или клик по зелёной — замкнуть</small>
+                </div>
                 <div class="more-menu-item" id="edit-area-item">
                     <svg class="menu-icon-svg" fill="currentColor" viewBox="0 0 24 24" width="18" height="18" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path d="M20,3a3,3,0,0,0-2.816,2H15V4a1,1,0,0,0-1-1H10A1,1,0,0,0,9,4V5H6.816A3.012,3.012,0,1,0,5.308,8.687,14.764,14.764,0,0,0,4.017,15H3a1,1,0,0,0-1,1v4a1,1,0,0,0,1,1H7a1,1,0,0,0,1-1V16a1,1,0,0,0-1-1H6.02C6.176,10.058,7.5,8.393,9,7.706V8a1,1,0,0,0,1,1h4a1,1,0,0,0,1-1V7.706c1.5.687,2.824,2.352,2.98,7.294H17a1,1,0,0,0-1,1v4a1,1,0,0,0,1,1h4a1,1,0,0,0,1-1V16a1,1,0,0,0-1-1H19.983a14.764,14.764,0,0,0-1.291-6.313A2.966,2.966,0,0,0,20,9a3,3,0,0,0,0-6ZM6,19H4V17H6Zm14,0H18V17h2ZM4,7A1,1,0,1,1,5,6,1,1,0,0,1,4,7Zm9,0H11V5h2Zm7,0a1,1,0,1,1,1-1A1,1,0,0,1,20,7Z"></path></svg>
                     Редактирование области
@@ -601,13 +617,15 @@
                 <!-- Панель кисти/ластика — внутри меню «Ещё», не пересекается с основной панелью -->
                 <div id="edit-area-controls" class="edit-area-controls" style="display:none;">
                     <div class="edit-area-title" id="paint-hud-title">Рисование</div>
+                    <p class="edit-area-hint" id="paint-hud-hint">Зажмите ЛКМ и ведите. Замкните к началу — полигон; иначе — полоса по толщине.</p>
                     <div class="settings-block-title">Слой</div>
                     <select id="draw-layer-select" class="search-input"></select>
                     <div class="edit-mode-btns">
                         <button type="button" class="mini-btn" id="edit-brush-btn">Кисть</button>
+                        <button type="button" class="mini-btn" id="edit-polygon-btn">По точкам</button>
                         <button type="button" class="mini-btn" id="edit-eraser-btn">Ластик</button>
                     </div>
-                    <div class="settings-block-title">Толщина: <span id="brush-size-value">20</span> м</div>
+                    <div class="settings-block-title">Толщина кисти/ластика: <span id="brush-size-value">20</span> м</div>
                     <input type="range" id="brush-size" min="5" max="80" value="20" class="range-input settings-range">
                     <button type="button" class="mini-btn mini-btn-red" id="finish-edit-btn">Готово</button>
                 </div>
@@ -776,7 +794,18 @@
                             </div>
                             <div class="input-group">
                                 <label>РОЛЬ</label>
-                                <input type="text" id="prof-role">
+                                <select id="prof-role" class="search-input" disabled>
+                                    <option value="Агроном">Агроном</option>
+                                    <option value="Оператор">Оператор</option>
+                                    <option value="Администратор">Администратор</option>
+                                </select>
+                            </div>
+                        </div>
+                        <div class="input-group">
+                            <label>ТЕКУЩИЙ ПАРОЛЬ</label>
+                            <div class="password-field">
+                                <input type="password" id="prof-current-password" placeholder="нужен только при смене пароля" autocomplete="current-password">
+                                <button type="button" class="password-toggle" aria-label="Показать пароль" title="Показать пароль"></button>
                             </div>
                         </div>
                         <div class="input-row">
@@ -817,6 +846,8 @@
         </div>
     </div>
 </div>
+
+<span id="global-toast" class="toast" hidden></span>
 
 <div id="app-modal" class="folder-picker app-modal" style="display:none;" role="dialog" aria-modal="true" aria-labelledby="app-modal-title">
     <div class="folder-picker-backdrop"></div>

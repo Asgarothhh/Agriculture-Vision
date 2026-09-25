@@ -66,6 +66,8 @@ services:
       S3_SECRET_KEY: ${S3_SECRET_KEY:-minioadmin}
       YOLO_WEIGHTS_PATH: /app/config/yolo_best.pt
       SEGFORMER_WEIGHTS_PATH: /app/config/segformer_best.pt
+      HF_HOME: /app/.cache/huggingface
+      TRANSFORMERS_CACHE: /app/.cache/huggingface
     volumes:
       - ../config:/app/config:ro
     depends_on:
@@ -95,6 +97,8 @@ services:
       S3_SECRET_KEY: ${S3_SECRET_KEY:-minioadmin}
       YOLO_WEIGHTS_PATH: /app/config/yolo_best.pt
       SEGFORMER_WEIGHTS_PATH: /app/config/segformer_best.pt
+      HF_HOME: /app/.cache/huggingface
+      TRANSFORMERS_CACHE: /app/.cache/huggingface
     volumes:
       - ../config:/app/config:ro
     depends_on:

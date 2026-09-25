@@ -43,12 +43,26 @@ def test_auth_login_refresh_me(client):
     assert logout.status_code == 200
 
     reset = client.post("/api/v1/auth/password-reset/request", json={"email": email})
-    assert reset.status_code in {200, 503}
+    assert reset.status_code == 200, reset.text
+    body = reset.json()
+    assert "detail" in body
+    if body.get("dev_code"):
+        confirm_ok = client.post(
+            "/api/v1/auth/password-reset/confirm",
+            json={
+                "email": email,
+                "code": body["dev_code"],
+                "new_password": "ValidPass2!",
+                "new_password_repeat": "ValidPass2!",
+            },
+        )
+        assert confirm_ok.status_code == 200, confirm_ok.text
+        return
     confirm = client.post(
         "/api/v1/auth/password-reset/confirm",
         json={
             "email": email,
-            "code": "000000",
+            "code": "0000",
             "new_password": "ValidPass2!",
             "new_password_repeat": "ValidPass2!",
         },
@@ -131,9 +145,71 @@ def test_layers_folders_objects_merge(client, auth_headers):
     assert conflict.status_code == 409
 
     auto_layers = [item for item in listed.json() if item["kind"] == "auto"]
-    if auto_layers:
-        denied = client.delete(f"/api/v1/layers/{auto_layers[0]['id']}", headers=auth_headers)
-        assert denied.status_code == 403
+    assert len(auto_layers) >= 6
+    denied = client.delete(f"/api/v1/layers/{auto_layers[0]['id']}", headers=auth_headers)
+    assert denied.status_code == 403
+
+
+def test_register_creates_auto_layers_only(client, auth_headers):
+    layers = client.get("/api/v1/layers/", headers=auth_headers)
+    assert layers.status_code == 200
+    items = layers.json()
+    auto = [item for item in items if item["kind"] == "auto"]
+    user = [item for item in items if item["kind"] != "auto"]
+    assert len(auto) >= 6
+    assert user == []
+
+
+def test_register_rejects_free_text_role(client):
+    email = f"role-{uuid.uuid4().hex[:8]}@example.com"
+    response = client.post(
+        "/api/v1/auth/register",
+        json={
+            "first_name": "Иван",
+            "last_name": "Петров",
+            "email": email,
+            "organization": "КФХ",
+            "role": "ГИС-специалист",
+            "password": "ValidPass1!",
+            "password_repeat": "ValidPass1!",
+        },
+    )
+    assert response.status_code == 422
+
+
+def test_delete_me_requires_password(client, auth_headers):
+    response = client.delete("/api/v1/users/me", headers=auth_headers)
+    assert response.status_code == 422
+
+
+def test_delete_me_wrong_password_is_forbidden(client, auth_headers):
+    response = client.request(
+        "DELETE",
+        "/api/v1/users/me",
+        headers={**auth_headers, "Content-Type": "application/json"},
+        content=json.dumps({"password": "WrongPass1!"}),
+    )
+    assert response.status_code == 403
+    assert "парол" in response.json()["detail"].lower()
+
+
+def test_patch_me_password_requires_current(client, auth_headers):
+    missing = client.patch(
+        "/api/v1/users/me",
+        headers=auth_headers,
+        json={"password": "ValidPass2!", "password_repeat": "ValidPass2!"},
+    )
+    assert missing.status_code == 422
+    wrong = client.patch(
+        "/api/v1/users/me",
+        headers=auth_headers,
+        json={
+            "current_password": "WrongPass1!",
+            "password": "ValidPass2!",
+            "password_repeat": "ValidPass2!",
+        },
+    )
+    assert wrong.status_code == 403
 
 
 def test_import_export(client, auth_headers):

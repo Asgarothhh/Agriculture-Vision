@@ -9,9 +9,10 @@ from typing import Any
 from uuid import UUID
 
 from fastapi import HTTPException, UploadFile, status
-from geoalchemy2.functions import ST_AsGeoJSON, ST_Area, ST_Transform, ST_Union
+from geoalchemy2.functions import ST_AsGeoJSON, ST_Area, ST_Collect, ST_MakeValid, ST_Transform, ST_UnaryUnion
 from geoalchemy2.shape import to_shape
-from shapely.geometry import mapping, shape
+from shapely import make_valid
+from shapely.geometry import shape
 from sqlalchemy import delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -292,11 +293,33 @@ async def merge_objects(db: AsyncSession, user: User, data: MergeRequest) -> dic
         raise HTTPException(status.HTTP_409_CONFLICT, detail="Можно объединять только объекты одного слоя")
     if any(obj.is_point for obj in objs):
         raise HTTPException(status.HTTP_409_CONFLICT, detail="Точечные объекты нельзя объединять")
-    union_geom = await db.scalar(
-        select(ST_Union(LayerObject.geom)).where(LayerObject.id.in_(data.object_ids))
-    )
     keep = objs[0]
-    keep.geom = union_geom
+    shapely_geom = None
+    if data.geom:
+        shapely_geom = make_valid(geojson_to_shape(data.geom))
+    else:
+        try:
+            union_geom = await db.scalar(
+                select(ST_UnaryUnion(ST_Collect(ST_MakeValid(LayerObject.geom)))).where(
+                    LayerObject.id.in_(data.object_ids)
+                )
+            )
+            shapely_geom = make_valid(to_shape(union_geom)) if union_geom is not None else None
+        except Exception:
+            from shapely.ops import unary_union
+
+            shapely_geom = unary_union([make_valid(to_shape(obj.geom)) for obj in objs])
+    if shapely_geom is None or shapely_geom.is_empty:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, detail="Не удалось объединить контуры")
+    if shapely_geom.geom_type == "GeometryCollection":
+        from shapely.ops import unary_union
+
+        parts = [g for g in shapely_geom.geoms if g.geom_type in {"Polygon", "MultiPolygon"} and not g.is_empty]
+        if not parts:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, detail="Не удалось объединить контуры")
+        shapely_geom = unary_union(parts)
+    keep.geom = wkb_element(shapely_geom, 4326)
+    keep.is_point = False
     for extra in objs[1:]:
         await db.delete(extra)
     await db.flush()

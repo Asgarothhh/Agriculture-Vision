@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+import logging
 
 from fastapi import HTTPException, status
 from sqlalchemy import func, select
-from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
+from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import get_settings
 from app.core.deps import ADMIN_ROLE, AGRONOMIST_ROLE, OPERATOR_ROLE
 from app.core.email import MailUnavailableError, send_email
 from app.core.seed import SYSTEM_LAYERS
@@ -29,6 +31,8 @@ from app.users_service.schemas import (
     TokenResponse,
 )
 
+logger = logging.getLogger(__name__)
+
 ROLE_ALIASES = {
     "администратор": ADMIN_ROLE,
     "administrator": ADMIN_ROLE,
@@ -46,7 +50,13 @@ def _utcnow() -> datetime:
 
 def _resolve_role_name(raw: str) -> str:
     key = (raw or "").strip().lower()
-    return ROLE_ALIASES.get(key, AGRONOMIST_ROLE)
+    name = ROLE_ALIASES.get(key)
+    if name is None:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Роль: Администратор, Агроном или Оператор",
+        )
+    return name
 
 
 async def _role_by_name(db: AsyncSession, name: str) -> Role:
@@ -182,12 +192,14 @@ async def logout_user(db: AsyncSession, refresh_token: str) -> None:
         await db.commit()
 
 
-async def request_password_reset(db: AsyncSession, email: str) -> None:
+async def request_password_reset(db: AsyncSession, email: str) -> dict:
+    settings = get_settings()
+    payload = {"detail": "Если аккаунт существует, код отправлен на почту", "mail_sent": False}
     user = (
         await db.execute(select(User).where(User.username == email.lower()))
     ).scalar_one_or_none()
     if user is None:
-        return
+        return payload
     last = (
         await db.execute(
             select(PasswordResetCode)
@@ -213,11 +225,16 @@ async def request_password_reset(db: AsyncSession, email: str) -> None:
             "Код восстановления пароля АгроВижион",
             f"Ваш код: {code}. Действителен 15 минут.",
         )
+        payload["mail_sent"] = True
     except MailUnavailableError as exc:
-        raise HTTPException(
-            status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Почтовый сервер недоступен. Попробуйте позже.",
-        ) from exc
+        if settings.app_env == "prod":
+            raise HTTPException(
+                status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Почтовый сервер недоступен. Попробуйте позже.",
+            ) from exc
+        logger.warning("SMTP is not configured; password reset code for %s is %s", email, code)
+        payload["dev_code"] = code
+    return payload
 
 
 async def confirm_password_reset(db: AsyncSession, data: PasswordResetConfirm) -> None:
@@ -283,12 +300,16 @@ async def update_profile(db: AsyncSession, user: User, data: ProfileUpdate) -> U
     if data.avatar_meta is not None:
         user.avatar_meta = data.avatar_meta
     if data.password:
+        if not verify_password(data.current_password or "", user.password_hash):
+            raise HTTPException(status.HTTP_403_FORBIDDEN, detail="Неверный текущий пароль")
         user.password_hash = hash_password(data.password)
     await db.commit()
     await db.refresh(user)
     return user
 
 
-async def delete_account(db: AsyncSession, user: User) -> None:
+async def delete_account(db: AsyncSession, user: User, password: str) -> None:
+    if not verify_password(password, user.password_hash):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, detail="Неверный пароль")
     await db.delete(user)
     await db.commit()

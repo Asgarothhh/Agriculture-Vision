@@ -68,6 +68,14 @@ class ModelRuntime:
                 self._loaded["yolo_seg_26"] = True
                 self._errors.pop("yolo_seg_26", None)
             except Exception as exc:
+                # #region agent log
+                try:
+                    import json as _json, time as _time
+                    with open("/home/asgaroth/Projects/Agriculture-Vision/Agriculture-Vision/.cursor/debug-14c4e4.log", "a") as _f:
+                        _f.write(_json.dumps({"sessionId":"14c4e4","hypothesisId":"E","location":"runtime.py:load_models","message":"yolo load failed","data":{"err":str(exc),"err_type":type(exc).__name__},"timestamp":int(_time.time()*1000)})+"\n")
+                except Exception:
+                    pass
+                # #endregion
                 logger.warning("YOLO load failed from %s: %s", yolo_path, exc)
                 self._loaded["yolo_seg_26"] = False
                 self._errors["yolo_seg_26"] = str(exc)
@@ -77,21 +85,49 @@ class ModelRuntime:
         if seg_path is not None:
             self._paths["segformer"] = str(seg_path)
             try:
+                # #region agent log
+                import json as _json, time as _time, traceback as _tb
+                def _dbg(hid, msg, **data):
+                    with open("/home/asgaroth/Projects/Agriculture-Vision/Agriculture-Vision/.cursor/debug-14c4e4.log", "a") as _f:
+                        _f.write(_json.dumps({"sessionId":"14c4e4","hypothesisId":hid,"location":"runtime.py:load_models","message":msg,"data":data,"timestamp":int(_time.time()*1000)})+"\n")
+                _dbg("A", "seg path resolved", path=str(seg_path), size=seg_path.stat().st_size if seg_path.is_file() else 0)
+                # #endregion
                 try:
                     from segmentation_service.runtime import SegmentationRuntime
                     from segmentation_service.settings import load_settings as load_seg_settings
-                except ModuleNotFoundError:
+                    # #region agent log
+                    _dbg("A", "imported segmentation_service.runtime")
+                    # #endregion
+                except ModuleNotFoundError as import_exc:
+                    # #region agent log
+                    _dbg("A", "primary import failed", err=str(import_exc), err_type=type(import_exc).__name__)
+                    # #endregion
                     from app.segmentation_service.runtime import SegmentationRuntime
                     from app.segmentation_service.settings import load_settings as load_seg_settings
+                    # #region agent log
+                    _dbg("C", "fallback app.segmentation_service imported")
+                    # #endregion
 
                 seg_settings = load_seg_settings()
                 seg_settings.checkpoint_path = seg_path
                 runtime = SegmentationRuntime(seg_settings)
+                # #region agent log
+                _dbg("D", "runtime constructed, calling load", checkpoint=str(seg_path))
+                # #endregion
                 runtime.load()
                 self._segformer = runtime
                 self._loaded["segformer"] = True
                 self._errors.pop("segformer", None)
+                # #region agent log
+                _dbg("D", "segformer load ok")
+                # #endregion
             except Exception as exc:
+                # #region agent log
+                try:
+                    _dbg("B", "segformer load exception", err=str(exc), err_type=type(exc).__name__, tb=_tb.format_exc()[-2000:])
+                except Exception:
+                    pass
+                # #endregion
                 logger.warning("SegFormer load failed from %s: %s", seg_path, exc)
                 self._loaded["segformer"] = False
                 self._errors["segformer"] = str(exc)

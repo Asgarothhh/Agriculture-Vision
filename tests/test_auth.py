@@ -3,6 +3,7 @@ from app.core.security import (
     decode_token,
     decrypt_secret,
     encrypt_secret,
+    generate_reset_code,
     hash_password,
     is_strong_password,
     verify_password,
@@ -38,3 +39,9 @@ def test_aes256_encrypt_roundtrip():
     encrypted = encrypt_secret(secret)
     assert encrypted != secret
     assert decrypt_secret(encrypted) == secret
+
+
+def test_reset_code_is_four_digits():
+    codes = {generate_reset_code() for _ in range(30)}
+    assert codes
+    assert all(len(code) == 4 and code.isdigit() for code in codes)

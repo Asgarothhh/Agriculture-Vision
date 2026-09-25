@@ -51,8 +51,7 @@ async def password_reset_request(
     payload: PasswordResetRequest,
     db: Annotated[AsyncSession, Depends(get_db)],
 ):
-    await service.request_password_reset(db, str(payload.email))
-    return {"detail": "Если аккаунт существует, код отправлен на почту"}
+    return await service.request_password_reset(db, str(payload.email))
 
 
 @router.post("/password-reset/confirm")

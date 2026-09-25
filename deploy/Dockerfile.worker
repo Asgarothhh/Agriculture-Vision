@@ -16,4 +16,6 @@ COPY models ./models
 RUN pip install --no-cache-dir -e .
 
 ENV PYTHONUNBUFFERED=1
+ENV HF_HOME=/app/.cache/huggingface
+ENV TRANSFORMERS_CACHE=/app/.cache/huggingface
 CMD ["celery", "-A", "app.tasks_service.workers", "worker", "-Q", "ml-gpu,cpu", "-l", "info"]

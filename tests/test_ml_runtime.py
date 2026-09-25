@@ -66,6 +66,34 @@ def test_load_models_invoked_and_health_lists_codes(monkeypatch):
     assert payload["status"] == "ready"
 
 
+def test_remap_encoder_keys_to_stages():
+    from app.ml_core.seg_remap import remap_segformer_state_dict
+
+    state = {
+        "model.segformer.encoder.patch_embeddings.0.proj.weight": 1,
+        "model.segformer.encoder.block.0.0.attention.self.query.weight": 2,
+        "model.segformer.encoder.block.0.0.attention.self.sr.weight": 3,
+        "model.segformer.encoder.block.1.2.mlp.dense1.weight": 4,
+        "model.decode_head.linear_c.0.proj.weight": 6,
+        "model.decode_head.classifier.weight": 5,
+    }
+    target = {
+        "model.segformer.stages.0.patch_embeddings.proj.weight",
+        "model.segformer.stages.0.blocks.0.attention.q_proj.weight",
+        "model.segformer.stages.0.blocks.0.attention.sequence_reduction.sequence_reduction.weight",
+        "model.segformer.stages.1.blocks.2.mlp.fc1.weight",
+        "model.decode_head.linear_projections.0.proj.weight",
+        "model.decode_head.classifier.weight",
+    }
+    remapped = remap_segformer_state_dict(state, target)
+    assert remapped["model.segformer.stages.0.patch_embeddings.proj.weight"] == 1
+    assert remapped["model.segformer.stages.0.blocks.0.attention.q_proj.weight"] == 2
+    assert remapped["model.segformer.stages.0.blocks.0.attention.sequence_reduction.sequence_reduction.weight"] == 3
+    assert remapped["model.segformer.stages.1.blocks.2.mlp.fc1.weight"] == 4
+    assert remapped["model.decode_head.linear_projections.0.proj.weight"] == 6
+    assert remapped["model.decode_head.classifier.weight"] == 5
+
+
 def test_infer_is_called(monkeypatch):
     called = {"n": 0}
 

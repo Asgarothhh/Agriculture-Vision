@@ -1,16 +1,23 @@
 import { getAccessToken } from "../api/client.js";
 import { dzzTileUrl } from "../api/dzz.js";
+import { dbg, withTimeout } from "../ui.js";
 
 const DEFAULT_CENTER = [53.9, 27.55];
-const DEFAULT_ZOOM = 8;
+const DEFAULT_ZOOM = 13;
+const TILE_OPTS = { maxZoom: 19, keepBuffer: 4, updateWhenZooming: true };
 
 let map;
 let tileSatellite;
 let tileScheme;
 let tileDzz;
+let tileCustom;
 let drawControl;
 let aoiLayer = null;
 let featureGroup;
+let loadingCount = 0;
+let dzzGrid = null;
+const visitedBounds = [];
+let visitedCursor = -1;
 
 export function getMap() {
   return map;
@@ -20,6 +27,21 @@ export function getFeatureGroup() {
   return featureGroup;
 }
 
+function bindTileLoadIndicator(layer) {
+  layer.on("loading", () => {
+    loadingCount += 1;
+    const el = document.getElementById("tiles-loading-indicator");
+    if (el) el.style.display = loadingCount > 0 ? "" : "none";
+  });
+  layer.on("load", () => {
+    loadingCount = Math.max(0, loadingCount - 1);
+    const el = document.getElementById("tiles-loading-indicator");
+    if (el) el.style.display = loadingCount > 0 ? "" : "none";
+  });
+}
+
+let dzzTileLogCount = 0;
+
 function AuthedTileLayer() {
   return L.TileLayer.extend({
     createTile(coords, done) {
@@ -28,16 +50,35 @@ function AuthedTileLayer() {
       const url = this.getTileUrl(coords);
       const token = getAccessToken();
       fetch(url, { headers: token ? { Authorization: `Bearer ${token}` } : {} })
-        .then((res) => {
+        .then(async (res) => {
           if (!res.ok) throw new Error(`tile ${res.status}`);
-          return res.blob();
-        })
-        .then((blob) => {
-          tile.onload = () => done(null, tile);
+          const blob = await res.blob();
+          if (blob.size < 1500) throw new Error(`empty tile ${blob.size}`);
+          tile.onload = () => {
+            if (tile.naturalWidth <= 1 && tile.naturalHeight <= 1) {
+              // #region agent log
+              dbg("C", "dzz-tile-placeholder", { url, w: tile.naturalWidth, h: tile.naturalHeight, size: blob.size });
+              // #endregion
+              done(new Error("placeholder tile"), tile);
+              return;
+            }
+            // #region agent log
+            if (dzzTileLogCount < 6) {
+              dzzTileLogCount += 1;
+              dbg("C", "dzz-tile-ok", { url, size: blob.size, w: tile.naturalWidth, h: tile.naturalHeight, hasToken: !!token });
+            }
+            // #endregion
+            done(null, tile);
+          };
           tile.onerror = (err) => done(err, tile);
           tile.src = URL.createObjectURL(blob);
         })
-        .catch((err) => done(err, tile));
+        .catch((err) => {
+          // #region agent log
+          dbg("C", "dzz-tile-fail", { url, error: String(err?.message || err), hasToken: !!token, z: coords?.z, x: coords?.x, y: coords?.y });
+          // #endregion
+          done(err, tile);
+        });
       return tile;
     },
   });
@@ -49,17 +90,27 @@ export function initMap() {
     return map;
   }
   map = L.map("map", { zoomControl: false }).setView(DEFAULT_CENTER, DEFAULT_ZOOM);
+  // #region agent log
+  window.__avMap = map;
+  // #endregion
   L.control.zoom({ position: "bottomleft" }).addTo(map);
   tileSatellite = L.tileLayer(
     "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
-    { maxZoom: 19, attribution: "Esri" },
+    { ...TILE_OPTS, attribution: "Esri", crossOrigin: true },
   );
   tileScheme = L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
-    maxZoom: 19,
+    ...TILE_OPTS,
     attribution: "OSM",
+    crossOrigin: true,
   });
   const DzzLayer = AuthedTileLayer();
-  tileDzz = new DzzLayer(dzzTileUrl("{z}", "{x}", "{y}"), { maxZoom: 22, attribution: "dzz.by" });
+  tileDzz = new DzzLayer(dzzTileUrl("{z}", "{x}", "{y}"), {
+    maxZoom: 22,
+    attribution: "dzz.by",
+    keepBuffer: 4,
+    updateWhenZooming: true,
+  });
+  [tileSatellite, tileScheme, tileDzz].forEach(bindTileLoadIndicator);
   tileSatellite.addTo(map);
   featureGroup = L.featureGroup().addTo(map);
   drawControl = new L.Control.Draw({
@@ -86,32 +137,59 @@ function updateScale() {
   if (!map) return;
   const z = map.getZoom();
   const center = map.getCenter();
+  const latRad = (center.lat * Math.PI) / 180;
+  const metersPerPx = (156543.03392 * Math.cos(latRad)) / 2 ** z;
   const el = document.getElementById("scale-display");
-  if (el) el.textContent = `1:${Math.round(591657550.5 / 2 ** z)}`;
+  if (el) el.textContent = `1:${Math.round((metersPerPx * 96) / 0.0254)}`;
   const tile = document.getElementById("tile-display");
   if (tile) {
     const n = 2 ** Math.floor(z);
     const x = Math.floor(((center.lng + 180) / 360) * n);
-    const latRad = (center.lat * Math.PI) / 180;
     const y = Math.floor(((1 - Math.log(Math.tan(latRad) + 1 / Math.cos(latRad)) / Math.PI) / 2) * n);
     tile.textContent = `z/x/y ${Math.floor(z)}/${x}/${y}`;
   }
 }
 
-export function setBasemap(kind) {
+export function setBasemap(kind, customUrl) {
+  // #region agent log
+  dbg("D", "set-basemap", { kind, hasCustom: !!customUrl, hasMap: !!map });
+  // #endregion
   if (!map) return;
-  [tileSatellite, tileScheme, tileDzz].forEach((layer) => {
-    if (map.hasLayer(layer)) map.removeLayer(layer);
+  [tileSatellite, tileScheme, tileDzz, tileCustom].forEach((layer) => {
+    if (layer && map.hasLayer(layer)) map.removeLayer(layer);
   });
   if (kind === "scheme") tileScheme.addTo(map);
   else if (kind === "dzz") tileDzz.addTo(map);
-  else tileSatellite.addTo(map);
+  else if (kind === "custom" && customUrl) {
+    tileCustom = L.tileLayer(customUrl, { ...TILE_OPTS, attribution: "custom", crossOrigin: true });
+    bindTileLoadIndicator(tileCustom);
+    tileCustom.addTo(map);
+  } else tileSatellite.addTo(map);
 }
 
 export function setAoiBounds(bounds) {
   clearAoi();
   aoiLayer = L.rectangle(bounds, { color: "#e14059", weight: 2, dashArray: "6 4", fillOpacity: 0.05 });
   aoiLayer.addTo(map);
+  rememberBounds(bounds);
+}
+
+export function rememberBounds(bounds) {
+  if (!bounds) return;
+  visitedBounds.unshift(L.latLngBounds(bounds));
+  if (visitedBounds.length > 40) visitedBounds.pop();
+  visitedCursor = 0;
+}
+
+export function cycleVisitedBounds() {
+  if (!visitedBounds.length || !map) return 0;
+  visitedCursor = (visitedCursor + 1) % visitedBounds.length;
+  map.fitBounds(visitedBounds[visitedCursor], { maxZoom: 16 });
+  return visitedCursor;
+}
+
+export function visitedCount() {
+  return visitedBounds.length;
 }
 
 export function clearAoi() {
@@ -173,6 +251,11 @@ export function addGeoJsonObject(obj, style) {
   layer.eachLayer((part) => {
     part.avObject = obj;
     part.avLayerId = obj.layer_id;
+    L.DomEvent.on(part, "click", (ev) => L.DomEvent.stopPropagation(ev));
+    const showLabels = document.getElementById("opt-field-labels")?.checked !== false;
+    if (showLabels && obj.name) {
+      part.bindTooltip(obj.name, { permanent: true, direction: "center", className: "field-label" });
+    }
   });
   featureGroup.addLayer(layer);
   return layer;
@@ -182,28 +265,52 @@ export function clearFeatures() {
   featureGroup.clearLayers();
 }
 
+async function paintTile(ctx, img, mapPos) {
+  const r = img.getBoundingClientRect();
+  const dx = r.left - mapPos.left;
+  const dy = r.top - mapPos.top;
+  if (img.src.startsWith("blob:")) {
+    ctx.drawImage(img, dx, dy, r.width, r.height);
+    return;
+  }
+  try {
+    const res = await fetch(img.src, { mode: "cors" });
+    const blob = await res.blob();
+    const bmp = await createImageBitmap(blob);
+    ctx.drawImage(bmp, dx, dy, r.width, r.height);
+  } catch {
+    ctx.drawImage(img, dx, dy, r.width, r.height);
+  }
+}
+
 export async function captureMapJpeg() {
-  const size = map.getSize();
-  const canvas = document.createElement("canvas");
-  canvas.width = Math.max(1, size.x);
-  canvas.height = Math.max(1, size.y);
-  const ctx = canvas.getContext("2d");
-  ctx.fillStyle = "#111";
-  ctx.fillRect(0, 0, canvas.width, canvas.height);
-  const pane = map.getPane("tilePane");
-  const mapPos = map.getContainer().getBoundingClientRect();
-  pane.querySelectorAll("img").forEach((img) => {
-    const r = img.getBoundingClientRect();
-    try {
-      ctx.drawImage(img, r.left - mapPos.left, r.top - mapPos.top, r.width, r.height);
-    } catch {
-      /* CORS */
-    }
-  });
-  const blob = await new Promise((resolve, reject) => {
-    canvas.toBlob((b) => (b ? resolve(b) : reject(new Error("toBlob failed"))), "image/jpeg", 0.92);
-  });
-  return new File([blob], `map_aoi_${Date.now()}.jpg`, { type: "image/jpeg" });
+  return withTimeout(
+    (async () => {
+      if (!map) throw new Error("Карта ещё не готова");
+      const size = map.getSize();
+      if (!size.x || !size.y) throw new Error("Пустой кадр карты");
+      const canvas = document.createElement("canvas");
+      canvas.width = Math.max(1, size.x);
+      canvas.height = Math.max(1, size.y);
+      const ctx = canvas.getContext("2d");
+      ctx.fillStyle = "#111";
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      const pane = map.getPane("tilePane");
+      const mapPos = map.getContainer().getBoundingClientRect();
+      const imgs = [...pane.querySelectorAll("img")];
+      await Promise.all(imgs.map((img) => paintTile(ctx, img, mapPos).catch(() => {})));
+      const blob = await new Promise((resolve, reject) => {
+        try {
+          canvas.toBlob((b) => (b ? resolve(b) : reject(new Error("Не удалось снять кадр карты"))), "image/jpeg", 0.92);
+        } catch (err) {
+          reject(err);
+        }
+      });
+      return new File([blob], `map_aoi_${Date.now()}.jpg`, { type: "image/jpeg" });
+    })(),
+    15000,
+    "Захват карты превысил 15 секунд",
+  );
 }
 
 export function enableAoiDraw(onDone) {
@@ -214,6 +321,25 @@ export function enableAoiDraw(onDone) {
     setAoiBounds(e.layer.getBounds());
     onDone?.(e.layer.getBounds());
   });
+}
+
+export function setDzzTileGrid(on) {
+  if (!map) return;
+  if (dzzGrid) {
+    map.removeLayer(dzzGrid);
+    dzzGrid = null;
+  }
+  if (!on) return;
+  dzzGrid = L.gridLayer({
+    tileSize: 256,
+    opacity: 1,
+  });
+  dzzGrid.createTile = () => {
+    const el = document.createElement("div");
+    el.style.border = "1px solid rgba(225,64,89,0.45)";
+    return el;
+  };
+  dzzGrid.addTo(map);
 }
 
 export { drawControl };

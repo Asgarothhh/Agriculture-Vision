@@ -63,6 +63,28 @@ test.beforeEach(async ({ request }, testInfo) => {
   if (!(await apiUp(request))) testInfo.skip(true, "API is not running on :8000");
 });
 
+test("password reset send code advances the modal", async ({ page, request }) => {
+  await page.goto("/");
+  await expect(page.locator("#screen-auth")).toBeVisible();
+  await page.click("#forgot-password-link");
+  await expect(page.locator("#app-modal")).toBeVisible();
+  await page.fill("#reset-email", EMAIL);
+  const resetWait = page.waitForResponse((res) => res.url().includes("/api/v1/auth/password-reset/request"));
+  await page.locator("#app-modal-actions button").filter({ hasText: "Отправить код" }).click();
+  const resetRes = await resetWait;
+  expect(resetRes.ok() || resetRes.status() === 429).toBeTruthy();
+  if (resetRes.status() === 429) {
+    await expect(page.locator("#reset-modal-error, #global-toast")).toContainText(/минуту|код/i);
+    return;
+  }
+  await expect(page.locator("#app-modal-title")).toContainText("Код", { timeout: 8000 });
+  const body = await resetRes.json().catch(() => ({}));
+  if (body?.dev_code) {
+    await expect(page.locator("#reset-code-display")).toContainText(String(body.dev_code));
+    await expect(page.locator("#reset-dev-hint")).toContainText(/SMTP/i);
+  }
+});
+
 test("protects map without a token", async ({ page }) => {
   await page.goto("/");
   await expect(page.locator("#screen-auth")).toBeVisible();
@@ -97,6 +119,8 @@ test("login remember_me logout", async ({ page }) => {
   const remember = await page.evaluate(() => localStorage.getItem("av_access_token"));
   expect(remember).toBeTruthy();
   await page.click(".topbar-logout");
+  await expect(page.locator("#app-modal")).toBeVisible();
+  await page.locator("#app-modal-actions button").filter({ hasText: "Выйти" }).click();
   await expect(page.locator("#screen-auth")).toBeVisible();
 });
 
@@ -105,9 +129,11 @@ test("layers merge import export and auto-layer delete", async ({ page, request 
   const headers = authHeaders(tokens);
   await openApp(page, request);
 
-  page.once("dialog", (dialog) => dialog.accept("E2E слой"));
   await page.locator("#create-layer-btn").click();
-  await expect(page.locator("#layers-list")).toContainText("E2E слой", { timeout: 10000 });
+  await expect(page.locator("#app-modal")).toBeVisible();
+  await page.locator("#modal-layer-name").fill("E2E слой");
+  await page.locator("#app-modal-actions button").filter({ hasText: "Создать" }).click();
+  await expect(page.locator("#user-layers-list")).toContainText("E2E слой", { timeout: 10000 });
 
   const layers = await request.get(`${API}/layers/`, { headers });
   const auto = (await layers.json()).find((item) => item.kind === "auto");
@@ -173,7 +199,7 @@ test("layers merge import export and auto-layer delete", async ({ page, request 
     mimeType: "application/geo+json",
     buffer: Buffer.from(JSON.stringify(geojson)),
   });
-  await expect(page.locator("#layers-list")).toContainText("e2e", { timeout: 15000 });
+  await expect(page.locator("#panel-layers")).toContainText("e2e", { timeout: 15000 });
 
   await page.locator(".sidebar-icons .icon-btn[data-panel=export]").click();
   await page.selectOption("#export-format", "geojson");
@@ -256,4 +282,89 @@ test("profile and activity", async ({ page, request }) => {
   const tokens = await loginApi(request);
   const history = await request.get(`${API}/activity/`, { headers: authHeaders(tokens) });
   expect(history.ok()).toBeTruthy();
+  await expect(page.locator("#prof-role")).toHaveValue("Агроном");
 });
+
+test("role select zoom pill sliders and no prompt", async ({ page, request }) => {
+  await page.goto("/");
+  await expect(page.locator("#screen-auth")).toBeVisible();
+  await expect(page.locator("#form-login .password-toggle svg")).toBeVisible();
+  await page.click("#switch-to-register");
+  await expect(page.locator("#reg-role")).toBeVisible();
+  const roles = await page.locator("#reg-role option").allTextContents();
+  expect(roles.map((item) => item.trim())).toEqual(["Агроном", "Оператор", "Администратор"]);
+
+  await openApp(page, request);
+  await expect(page.locator("#status-dzz")).toHaveClass(/status-idle/);
+  await expect(page.locator("#status-dzz")).toContainText("Не подключено");
+  await expect(page.locator("#tile-display")).toContainText("z/x/y 13/", { timeout: 15000 });
+  await expect(page.locator("#layers-count-badge")).toContainText("объектов");
+  await expect(page.locator("#opt-dzz-url")).toHaveValue(/ImageServer$/);
+
+  await page.locator(".sidebar-icons .icon-btn[data-panel=settings]").click();
+  await page.locator("#opt-point-size").evaluate((el) => {
+    el.value = "9";
+    el.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+  await expect(page.locator("#point-size-value")).toHaveText("9");
+  await page.locator("#save-settings-btn").click();
+  await expect(page.locator("#toast")).toContainText("Настройки сохранены");
+
+  page.on("dialog", () => {
+    throw new Error("native prompt/confirm is not allowed");
+  });
+  await page.locator(".sidebar-icons .icon-btn[data-panel=layers]").click();
+  await page.locator("#create-folder-btn").click();
+  await expect(page.locator("#app-modal-title")).toContainText("папка");
+  await page.locator("#app-modal-actions button").filter({ hasText: "Отмена" }).click();
+});
+
+test("dzz status is coalesced across tab clicks", async ({ page, request }) => {
+  const urls = [];
+  page.on("request", (req) => {
+    if (req.url().includes("/api/v1/dzz/status")) urls.push(req.url());
+  });
+  await openApp(page, request);
+  await page.waitForTimeout(400);
+  const before = urls.length;
+  const panels = ["layers", "settings", "export", "layers", "settings"];
+  for (const panel of panels) {
+    await page.locator(`.sidebar-icons .icon-btn[data-panel=${panel}]`).click();
+  }
+  await page.waitForTimeout(300);
+  expect(urls.length - before).toBeLessThanOrEqual(1);
+  expect(urls.length).toBeLessThanOrEqual(2);
+});
+
+test("hotkeys and tools do not use prompt", async ({ page, request }) => {
+  page.on("dialog", () => {
+    throw new Error("native prompt/confirm is not allowed");
+  });
+  await openApp(page, request);
+  await page.locator(".tool-btn[data-tool=ruler]").click();
+  await expect(page.locator("#map-area")).toHaveClass(/tool-ruler/);
+  await page.locator(".tool-btn[data-tool=compass]").click();
+  await expect(page.locator("#map-area")).toHaveClass(/tool-compass/);
+  await page.keyboard.press("Escape");
+  await expect(page.locator("#map-area")).toHaveClass(/tool-select/, { timeout: 8000 });
+  await page.locator("#sidebar-edge-toggle").click();
+  await expect(page.locator("#sidebar-panel-wrap")).toHaveClass(/collapsed/);
+  await page.locator("#sidebar-edge-toggle").click();
+  await expect(page.locator("#sidebar-panel-wrap")).not.toHaveClass(/collapsed/);
+  await page.locator("#sidebar-edge-toggle").click();
+  await expect(page.locator("#sidebar-panel-wrap")).toHaveClass(/collapsed/);
+  await page.locator(".sidebar-icons .icon-btn[data-panel=settings]").click();
+  await expect(page.locator("#sidebar-panel-wrap")).not.toHaveClass(/collapsed/);
+  await page.locator("#tool-more-btn").click();
+  await expect(page.locator("#more-menu")).toHaveClass(/active/);
+  await page.locator("#create-area-item").click();
+  await expect(page.locator("#map-area")).toHaveClass(/tool-brush/);
+  await expect(page.locator("#edit-area-controls")).toBeVisible();
+  await expect(page.locator("#edit-polygon-btn")).toBeVisible();
+  await page.locator("#edit-polygon-btn").click();
+  await expect(page.locator("#map-area")).toHaveClass(/tool-polygon/);
+  await expect(page.locator("#paint-hud-hint")).toContainText(/вершин/i);
+  await page.locator("#edit-eraser-btn").click();
+  await expect(page.locator("#map-area")).toHaveClass(/tool-eraser/);
+});
+

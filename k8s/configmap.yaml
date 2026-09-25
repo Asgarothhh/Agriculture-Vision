@@ -13,3 +13,5 @@ data:
   DATABASE_SYNC_URL: "postgresql://developer:developer@postgres-service:5432/agriculture-vision"
   POSTGRES_HOST: "postgres-service"
   CELERY_BROKER_URL: "redis://redis-service:6379/0"
+  HF_HOME: "/app/.cache/huggingface"
+  TRANSFORMERS_CACHE: "/app/.cache/huggingface"

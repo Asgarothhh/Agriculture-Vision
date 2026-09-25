@@ -40,10 +40,12 @@ export function deleteObject(id) {
   return api(`/api/v1/objects/${id}`, { method: "DELETE" });
 }
 
-export function mergeObjects(objectIds) {
+export function mergeObjects(objectIds, geom) {
+  const body = { object_ids: objectIds };
+  if (geom) body.geom = geom;
   return api("/api/v1/objects/merge", {
     method: "POST",
-    body: JSON.stringify({ object_ids: objectIds }),
+    body: JSON.stringify(body),
   });
 }
 

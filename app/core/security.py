@@ -76,7 +76,7 @@ def decode_token(token: str) -> dict[str, Any]:
 
 
 def generate_reset_code() -> str:
-    return f"{secrets.randbelow(1_000_000):06d}"
+    return f"{secrets.randbelow(10_000):04d}"
 
 
 def new_jti() -> str:

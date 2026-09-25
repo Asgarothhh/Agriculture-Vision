@@ -1,7 +1,7 @@
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
 
 class DzzConnectRequest(BaseModel):
-    login: str = Field(min_length=1)
-    password: str = Field(min_length=1)
+    login: str = ""
+    password: str = ""
     service_url: str | None = None

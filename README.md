@@ -60,6 +60,24 @@ cd frontend && npx playwright install chromium && npm run test:e2e
 
 Маркер `@pytest.mark.ml` — живая загрузка весов; в CI без GPU/файлов тесты весов пропускаются.
 
+## Подключение dzz.by
+
+Ортофотоподложка идёт через FastAPI `POST /api/v1/dzz/connect` (нужна сессия пользователя), тайлы — `GET /api/v1/dzz/tiles/{z}/{x}/{y}`.
+
+1. Войдите в приложение (например `agronom@agrovision.dev` / `ValidPass1!`).
+2. Нажмите **«Подключить dzz.by»** в шапке (или пилюлю `dzz.by · Не подключено`). Откроется панель настроек, подложка переключится на ортофото.
+3. Если портал требует учётку — в блоке **«Доступ к dzz.by»** укажите логин и пароль. Если ImageServer открытый, поля можно оставить пустыми.
+4. Адрес по умолчанию:  
+   `https://www.dzz.by/arcgis/rest/services/georesursDDZ/Belarus_web_mercator_all/ImageServer`
+   (ортофото Беларуси в Web Mercator, не слой `Polya_all` — он даёт пустую карту в городе).  
+   (корень ImageServer, без `/tile/{z}/{y}/{x}`). При необходимости замените на URL из [geodzz.by](https://geodzz.by/izuchdz).
+5. Нажмите **«Проверить подключение»**. Успех: пилюля `dzz.by · Онлайн`, тост «dzz.by подключён», внизу карты — участки областей.
+6. В списке «Подложка» оставьте «Ортофото dzz.by».
+
+Отключение: **«Выйти из dzz.by»** в тех же настройках.
+
+Ошибки: `Неверные учётные данные dzz.by` — проверьте логин/пароль; `dzz.by недоступен` — сеть или URL; пилюля `dzz.by · Ошибка` — сервис ответил, но не `online`.
+
 ## Docker Compose
 
 Один вход: [http://localhost](http://localhost) (Nginx отдаёт `frontend/dist` и проксирует `/api/`).

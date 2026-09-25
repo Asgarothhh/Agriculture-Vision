@@ -58,12 +58,25 @@ export class ApiError extends Error {
 
 let refreshPromise = null;
 
+function isAuthTokenError(payload) {
+  const detail = typeof payload?.detail === "string" ? payload.detail : "";
+  if (/неверн.*парол/i.test(detail)) return false;
+  if (/user inactive/i.test(detail)) return false;
+  return true;
+}
+
 async function parseBody(res) {
+  if (res.status === 204 || res.status === 205) return null;
   const ct = (res.headers.get("content-type") || "").toLowerCase();
   if (ct.includes("application/json") || ct.includes("application/geo+json")) {
-    return res.json();
+    const text = await res.text();
+    if (!text) return null;
+    try {
+      return JSON.parse(text);
+    } catch {
+      return { detail: text };
+    }
   }
-  if (res.status === 204) return null;
   if (!res.ok) {
     const text = await res.text();
     return text ? { detail: text } : null;
@@ -81,11 +94,11 @@ async function rawFetch(path, options = {}, { skipAuth = false, skipRefresh = fa
     headers.set("Content-Type", "application/json");
   }
   const res = await fetch(path, { ...options, headers });
-  if (res.status === 401 && !skipRefresh && !skipAuth) {
+  const payload = await parseBody(res);
+  if (res.status === 401 && !skipRefresh && !skipAuth && isAuthTokenError(payload)) {
     const refreshed = await refreshAccessToken();
     if (refreshed) return rawFetch(path, options, { skipAuth, skipRefresh: true });
   }
-  const payload = await parseBody(res);
   if (!res.ok) {
     const detail = formatDetail(payload) || `HTTP ${res.status}`;
     throw new ApiError(res.status, detail, payload);

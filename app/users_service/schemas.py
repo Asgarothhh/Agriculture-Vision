@@ -8,6 +8,8 @@ from pydantic import BaseModel, EmailStr, Field, field_validator, model_validato
 
 from app.core.security import is_strong_password
 
+ALLOWED_ROLES = ("Администратор", "Агроном", "Оператор")
+
 
 class RegisterRequest(BaseModel):
     first_name: str = Field(min_length=1, max_length=100)
@@ -17,6 +19,13 @@ class RegisterRequest(BaseModel):
     role: str = Field(default="Агроном", max_length=100)
     password: str
     password_repeat: str
+
+    @field_validator("role")
+    @classmethod
+    def _known_role(cls, value: str) -> str:
+        if value not in ALLOWED_ROLES:
+            raise ValueError("Роль: Администратор, Агроном или Оператор")
+        return value
 
     @field_validator("password")
     @classmethod
@@ -60,7 +69,7 @@ class PasswordResetRequest(BaseModel):
 
 class PasswordResetConfirm(BaseModel):
     email: EmailStr
-    code: str = Field(min_length=6, max_length=6)
+    code: str = Field(min_length=4, max_length=4, pattern=r"^\d{4}$")
     new_password: str
     new_password_repeat: str
 
@@ -85,6 +94,7 @@ class ProfileUpdate(BaseModel):
     last_name: str | None = Field(default=None, min_length=1, max_length=100)
     organization: str | None = Field(default=None, max_length=255)
     avatar_meta: dict[str, Any] | None = None
+    current_password: str | None = None
     password: str | None = None
     password_repeat: str | None = None
 
@@ -92,6 +102,8 @@ class ProfileUpdate(BaseModel):
     def _password_rules(self) -> ProfileUpdate:
         if self.password is None:
             return self
+        if not (self.current_password or "").strip():
+            raise ValueError("Укажите текущий пароль")
         if not is_strong_password(self.password):
             raise ValueError(
                 "Пароль: минимум 8 символов, строчная и заглавная буквы, спецсимвол"
@@ -114,3 +126,7 @@ class ProfileResponse(BaseModel):
     created_at: datetime
 
     model_config = {"from_attributes": True}
+
+
+class DeleteAccountRequest(BaseModel):
+    password: str

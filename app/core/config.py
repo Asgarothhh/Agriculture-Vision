@@ -42,6 +42,7 @@ class Settings(BaseSettings):
     s3_access_key: str = "minioadmin"
     s3_secret_key: str = "minioadmin"
     s3_region: str = "us-east-1"
+    local_storage_dir: str = "data/uploads"
 
     yolo_weights_path: str = "config/yolo_best.pt"
     segformer_weights_path: str = "config/segformer_best.pt"
@@ -55,7 +56,7 @@ class Settings(BaseSettings):
     mail_from: str = "noreply@agrovision.local"
 
     dzz_default_url: str = (
-        "https://www.dzz.by/arcgis/rest/services/georesursDDZ/Polya_all/ImageServer"
+        "https://www.dzz.by/arcgis/rest/services/georesursDDZ/Belarus_web_mercator_all/ImageServer"
     )
 
     @field_validator("database_url")
