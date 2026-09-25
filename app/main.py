@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import uuid
 from contextlib import asynccontextmanager
 
@@ -16,7 +17,7 @@ from slowapi.errors import RateLimitExceeded
 from app.core.config import get_settings
 from app.core.database import async_engine, import_all_models
 from app.core.ratelimit import limiter
-from app.ml_service.runtime import load_models
+from app.core.seed import seed
 from app.dzz_service.routers import connection_router, proxy_router
 from app.layers_service.routers import folders_router, import_export_router, layers_router, objects_router
 from app.ml_service.routers import router as models_router
@@ -62,7 +63,10 @@ class RequestContextMiddleware:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    load_models()
+    try:
+        seed()
+    except Exception:
+        logging.getLogger(__name__).exception("startup seed failed")
     yield
 
 

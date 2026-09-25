@@ -7,96 +7,104 @@ variables:
   KUBE_NAMESPACE: "ml-service"
   API_IMAGE: "agriculture-vision-api"
   WORKER_IMAGE: "agriculture-vision-worker"
+  NGINX_IMAGE: "agriculture-vision-nginx"
 
-# --- СТАДИЯ TEST ---
 unit-tests:
   stage: test
   script:
-    - echo "Применение конфигурации из переменной ENV_FILE..."
-    - cp $ENV_FILE .env
-    - export $(grep -v '^#' .env | xargs)
+    - |
+      if [ -n "${ENV_FILE:-}" ] && [ -f "$ENV_FILE" ]; then
+        cp "$ENV_FILE" .env
+      elif [ -f .env.example ]; then
+        cp .env.example .env
+      fi
+    - export POSTGRES_USER="${POSTGRES_USER:-developer}"
+    - export POSTGRES_PASSWORD="${POSTGRES_PASSWORD:-developer}"
+    - export POSTGRES_DB="${POSTGRES_DB:-agriculture-vision}"
+    - export DATABASE_URL="postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@127.0.0.1:5432/${POSTGRES_DB}"
+    - export DATABASE_SYNC_URL="postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@127.0.0.1:5432/${POSTGRES_DB}"
+    - export REDIS_URL="redis://127.0.0.1:6379/0"
 
-    - echo "Запуск тестовых контейнеров (PostgreSQL/PostGIS + Redis)..."
     - docker rm -f test-postgres test-redis || true
-    - docker run -d --name test-postgres -p 5432:5432 -e POSTGRES_USER=${POSTGRES_USER:-developer} -e POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-CHANGE_ME} -e POSTGRES_DB=${POSTGRES_DB:-agriculture-vision} postgis/postgis:15-3.4
-    - docker run -d --name test-redis -p 6379:6379 redis:7-alpine
-    - echo "Ожидание инициализации сервисов..."
-    - sleep 5
+    - docker run -d --name test-postgres -p 127.0.0.1:5432:5432 -e POSTGRES_USER="$POSTGRES_USER" -e POSTGRES_PASSWORD="$POSTGRES_PASSWORD" -e POSTGRES_DB="$POSTGRES_DB" postgis/postgis:15-3.4
+    - docker run -d --name test-redis -p 127.0.0.1:6379:6379 redis:7-alpine
+    - |
+      for i in $(seq 1 30); do
+        docker exec test-postgres pg_isready -U "$POSTGRES_USER" -d "$POSTGRES_DB" && break
+        sleep 2
+      done
 
-    - echo "Подготовка Python-окружения..."
-    - export GDAL_VERSION=$(gdal-config --version)
+    - export GDAL_VERSION="$(gdal-config --version 2>/dev/null || true)"
     - if [ ! -d ".venv" ]; then python3 -m venv .venv; fi
     - source .venv/bin/activate
     - pip install --upgrade pip
     - pip install -r requirements.txt
-
-    - echo "Применение миграций Alembic и запуск автотестов..."
     - alembic upgrade head
-    - pytest tests/
-
+    - python -m app.core.seed
+    - pytest tests/ -m "not ml" -q
   after_script:
-    - echo "Остановка и удаление тестовых контейнеров..."
     - docker rm -f test-postgres test-redis || true
-
   rules:
-    - when: never
     - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
     - if: '$CI_COMMIT_BRANCH'
   allow_failure: true
 
-# --- СТАДИЯ BUILD ---
 build-images:
   stage: build
+  needs: []
   script:
-    - echo "Проверка и запуск Minikube..."
     - minikube status || minikube start --driver=docker --memory=8192 --cpus=4 || (minikube delete --all && minikube start --driver=docker --memory=8192 --cpus=4)
-
-    - echo "Переключение Docker на демон Minikube..."
-    - eval $(minikube docker-env)
-
-    - echo "Сборка Docker-образов напрямую внутри кластера..."
-    - docker build -f deploy/Dockerfile.api -t $API_IMAGE:$CI_COMMIT_SHORT_SHA .
-    - docker build -f deploy/Dockerfile.worker -t $WORKER_IMAGE:$CI_COMMIT_SHORT_SHA .
+    - eval "$(minikube docker-env)"
+    - docker build -f deploy/Dockerfile.api -t "$API_IMAGE:$CI_COMMIT_SHORT_SHA" .
+    - docker build -f deploy/Dockerfile.worker -t "$WORKER_IMAGE:$CI_COMMIT_SHORT_SHA" .
+    - docker build -f deploy/Dockerfile.nginx --no-cache --build-arg CI_COMMIT_SHORT_SHA="$CI_COMMIT_SHORT_SHA" -t "$NGINX_IMAGE:$CI_COMMIT_SHORT_SHA" .
   rules:
     - if: '$CI_COMMIT_BRANCH == "main"'
     - if: '$CI_COMMIT_BRANCH == "dev"'
     - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
       changes:
         - "app/**/*"
+        - "frontend/**/*"
         - "models/**/*"
         - "deploy/**/*"
+        - "k8s/**/*"
         - "requirements.txt"
     - if: '$CI_COMMIT_BRANCH'
       changes:
         - "app/**/*"
+        - "frontend/**/*"
         - "models/**/*"
         - "deploy/**/*"
+        - "k8s/**/*"
         - "requirements.txt"
 
 deploy-k8s:
   stage: deploy
+  needs: ["build-images"]
   script:
+    - eval "$(minikube docker-env)"
+    - kubectl apply -f k8s/namespace-and-quota.yaml
     - kubectl apply -f k8s/configmap.yaml
     - kubectl apply -f k8s/postgres.yaml
     - kubectl apply -f k8s/redis.yaml
+    - kubectl rollout status deployment/postgres-deployment -n "$KUBE_NAMESPACE" --timeout=180s
 
-    - echo "Ожидание готовности PostgreSQL..."
-    - kubectl rollout status deployment/postgres-deployment -n $KUBE_NAMESPACE --timeout=180s
+    - |
+      tmpdir="$(mktemp -d)"
+      sed "s|API_IMAGE_PLACEHOLDER|$API_IMAGE:$CI_COMMIT_SHORT_SHA|g" k8s/api-deployment.yaml > "$tmpdir/api.yaml"
+      sed "s|WORKER_IMAGE_PLACEHOLDER|$WORKER_IMAGE:$CI_COMMIT_SHORT_SHA|g" k8s/worker-deployment.yaml > "$tmpdir/worker.yaml"
+      sed "s|NGINX_IMAGE_PLACEHOLDER|$NGINX_IMAGE:$CI_COMMIT_SHORT_SHA|g; s|GIT_SHA_PLACEHOLDER|$CI_COMMIT_SHORT_SHA|g" k8s/nginx.yaml > "$tmpdir/nginx.yaml"
+      kubectl apply -f "$tmpdir/api.yaml"
+      kubectl apply -f "$tmpdir/worker.yaml"
+      kubectl apply -f "$tmpdir/nginx.yaml"
+      kubectl rollout restart deployment/agriculture-vision-nginx -n "$KUBE_NAMESPACE"
 
-    - echo "Подстановка образов и деплой API/Worker..."
-    - sed -i "s|API_IMAGE_PLACEHOLDER|$API_IMAGE:$CI_COMMIT_SHORT_SHA|g" k8s/api-deployment.yaml
-    - sed -i "s|WORKER_IMAGE_PLACEHOLDER|$WORKER_IMAGE:$CI_COMMIT_SHORT_SHA|g" k8s/worker-deployment.yaml
-    - kubectl apply -f k8s/api-deployment.yaml
-    - kubectl apply -f k8s/worker-deployment.yaml
-
-    - echo "Ожидание готовности API перед миграциями..."
-    - kubectl rollout status deployment/agriculture-vision-api -n $KUBE_NAMESPACE --timeout=120s
-
-    - echo "Применение миграций Alembic..."
-    - kubectl exec -n $KUBE_NAMESPACE deployment/agriculture-vision-api -- alembic upgrade head
-
-    - echo "Проверка завершения раскатки Worker..."
-    - kubectl rollout status deployment/agriculture-vision-worker -n $KUBE_NAMESPACE --timeout=120s
+    - kubectl rollout status deployment/agriculture-vision-api -n "$KUBE_NAMESPACE" --timeout=300s
+    - kubectl rollout status deployment/agriculture-vision-worker -n "$KUBE_NAMESPACE" --timeout=180s
+    - kubectl rollout status deployment/agriculture-vision-nginx -n "$KUBE_NAMESPACE" --timeout=120s
+    - echo "Новый фронт: minikube service agri-nginx-service -n $KUBE_NAMESPACE --url"
+    - echo "Проверка sha сборки: /version.json"
+    - kubectl get pods -n "$KUBE_NAMESPACE" -o wide
   rules:
     - if: '$CI_COMMIT_BRANCH == "dev"'
     - if: '$CI_COMMIT_BRANCH == "main"'

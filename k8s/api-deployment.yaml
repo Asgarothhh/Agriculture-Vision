@@ -17,6 +17,14 @@ spec:
       labels:
         app: agri-api
     spec:
+      initContainers:
+        - name: migrate
+          image: API_IMAGE_PLACEHOLDER
+          imagePullPolicy: IfNotPresent
+          command: ["sh", "-c", "alembic upgrade head && python -m app.core.seed"]
+          envFrom:
+            - configMapRef:
+                name: agri-config
       containers:
         - name: fastapi-api
           image: API_IMAGE_PLACEHOLDER
@@ -37,7 +45,7 @@ spec:
             httpGet:
               path: /health
               port: 8000
-            initialDelaySeconds: 30
+            initialDelaySeconds: 15
             periodSeconds: 15
             timeoutSeconds: 5
             failureThreshold: 5
@@ -45,7 +53,7 @@ spec:
             httpGet:
               path: /api/v1/ready
               port: 8000
-            initialDelaySeconds: 40
+            initialDelaySeconds: 10
             periodSeconds: 10
             timeoutSeconds: 5
             successThreshold: 1
@@ -66,11 +74,24 @@ metadata:
   name: agri-api-service
   namespace: ml-service
 spec:
-  type: NodePort
+  type: ClusterIP
   ports:
     - port: 8000
       targetPort: 8000
-      nodePort: 30080
+      name: http
+  selector:
+    app: agri-api
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: api
+  namespace: ml-service
+spec:
+  type: ClusterIP
+  ports:
+    - port: 8000
+      targetPort: 8000
       name: http
   selector:
     app: agri-api

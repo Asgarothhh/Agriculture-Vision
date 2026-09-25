@@ -4,6 +4,7 @@ metadata:
   name: agri-config
   namespace: ml-service
 data:
+  APP_ENV: "prod"
   POSTGRES_HOST: "postgres-service"
   POSTGRES_PORT: "5432"
   POSTGRES_DB: "agriculture-vision"
@@ -11,7 +12,8 @@ data:
   POSTGRES_PASSWORD: "developer"
   DATABASE_URL: "postgresql+asyncpg://developer:developer@postgres-service:5432/agriculture-vision"
   DATABASE_SYNC_URL: "postgresql://developer:developer@postgres-service:5432/agriculture-vision"
-  POSTGRES_HOST: "postgres-service"
+  REDIS_URL: "redis://redis-service:6379/0"
   CELERY_BROKER_URL: "redis://redis-service:6379/0"
+  CORS_ORIGINS: "http://localhost,http://localhost:80,http://localhost:30080,http://127.0.0.1,http://127.0.0.1:80,http://127.0.0.1:30080"
   HF_HOME: "/app/.cache/huggingface"
   TRANSFORMERS_CACHE: "/app/.cache/huggingface"

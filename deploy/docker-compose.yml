@@ -109,6 +109,8 @@ services:
     build:
       context: ..
       dockerfile: deploy/Dockerfile.nginx
+      args:
+        CI_COMMIT_SHORT_SHA: ${CI_COMMIT_SHORT_SHA:-local}
     ports:
       - "80:80"
     depends_on:
