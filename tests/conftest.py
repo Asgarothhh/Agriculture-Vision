@@ -56,7 +56,6 @@ def _stub_ml_load(monkeypatch):
         runtime._errors = {}
         return runtime.health()
 
-    monkeypatch.setattr("app.main.load_models", fake_load, raising=False)
     monkeypatch.setattr("app.ml_service.runtime.load_models", fake_load)
     monkeypatch.setattr(runtime, "load_models", fake_load)
     fake_load()
