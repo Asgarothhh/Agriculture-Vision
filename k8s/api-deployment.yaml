@@ -50,6 +50,15 @@ spec:
             timeoutSeconds: 5
             successThreshold: 1
             failureThreshold: 6
+          volumeMounts:
+            - name: config-volume
+              mountPath: /app/config
+              readOnly: true
+      volumes:
+        - name: config-volume
+          hostPath:
+            path: /var/agriculture-vision/config
+            type: DirectoryOrCreate
 ---
 apiVersion: v1
 kind: Service
