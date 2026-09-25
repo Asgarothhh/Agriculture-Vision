@@ -70,6 +70,10 @@ deploy-k8s:
     - echo "Frontend URL = minikube service agri-nginx-service -n $KUBE_NAMESPACE --url"
     - echo "Check frontend build via /version.json"
     - kubectl get pods -n "$KUBE_NAMESPACE" -o wide
+    - kubectl get svc -n "$KUBE_NAMESPACE"
+    - chmod +x deploy/refresh-host-nginx.sh
+    - bash deploy/refresh-host-nginx.sh
+    - curl -sfI "http://$(minikube ip):30080/" || true
   rules:
     - if: '$CI_COMMIT_BRANCH == "dev"'
     - if: '$CI_COMMIT_BRANCH == "main"'
