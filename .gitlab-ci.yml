@@ -18,7 +18,7 @@ build-images:
       - config/segformer_best.pt
     policy: pull-push
   script:
-    - minikube status || minikube start --driver=docker --memory=8192 --cpus=4 || (minikube delete --all && minikube start --driver=docker --memory=8192 --cpus=4)
+    - minikube status || minikube start --driver=docker --memory=8192 --cpus=4 --ports=30080:30080 || (minikube delete --all && minikube start --driver=docker --memory=8192 --cpus=4 --ports=30080:30080)
     - eval "$(minikube docker-env)"
     - bash deploy/prepare-weights.sh
     - docker build -f deploy/Dockerfile.api -t "$API_IMAGE:$CI_COMMIT_SHORT_SHA" .
@@ -67,13 +67,12 @@ deploy-k8s:
     - kubectl rollout status deployment/agriculture-vision-api -n "$KUBE_NAMESPACE" --timeout=300s
     - kubectl rollout status deployment/agriculture-vision-worker -n "$KUBE_NAMESPACE" --timeout=180s
     - kubectl rollout status deployment/agriculture-vision-nginx -n "$KUBE_NAMESPACE" --timeout=120s
-    - echo "Frontend URL = minikube service agri-nginx-service -n $KUBE_NAMESPACE --url"
-    - echo "Check frontend build via /version.json"
     - kubectl get pods -n "$KUBE_NAMESPACE" -o wide
     - kubectl get svc -n "$KUBE_NAMESPACE"
+    - kubectl logs -n "$KUBE_NAMESPACE" deploy/agriculture-vision-nginx --tail=40 || true
     - chmod +x deploy/refresh-host-nginx.sh
     - bash deploy/refresh-host-nginx.sh
-    - curl -sfI "http://$(minikube ip):30080/" || true
+    - curl -sfI "http://127.0.0.1:30080/" || curl -sfI "http://$(minikube ip):30080/" || true
   rules:
     - if: '$CI_COMMIT_BRANCH == "dev"'
     - if: '$CI_COMMIT_BRANCH == "main"'
