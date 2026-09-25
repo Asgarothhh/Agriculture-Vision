@@ -66,7 +66,6 @@ deploy-k8s:
     - kubectl rollout status deployment/agriculture-vision-nginx -n "$KUBE_NAMESPACE" --timeout=120s
     - kubectl get pods -n "$KUBE_NAMESPACE" -o wide
     - kubectl get svc -n "$KUBE_NAMESPACE"
-    - curl -sf "http://$(minikube ip):30800/api/v1/health"
     - chmod +x deploy/refresh-host-nginx.sh
     - bash deploy/refresh-host-nginx.sh
     - curl -sf "http://127.0.0.1/api/v1/health"
