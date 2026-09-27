@@ -73,14 +73,15 @@ export function initMap() {
   }
   map = L.map("map", { zoomControl: false }).setView(DEFAULT_CENTER, DEFAULT_ZOOM);
   L.control.zoom({ position: "bottomleft" }).addTo(map);
-  tileSatellite = L.tileLayer(
-    "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
-    { ...TILE_OPTS, attribution: "Esri", crossOrigin: true },
-  );
+  tileSatellite = L.tileLayer("/basemap/esri/{z}/{y}/{x}", {
+    ...TILE_OPTS,
+    attribution: "Esri",
+    crossOrigin: "anonymous",
+  });
   tileScheme = L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
     ...TILE_OPTS,
     attribution: "OSM",
-    crossOrigin: true,
+    crossOrigin: "anonymous",
   });
   const DzzLayer = DzzTileLayer();
   tileDzz = new DzzLayer("", {
@@ -140,7 +141,7 @@ export function setBasemap(kind, customUrl) {
     tileDzz.addTo(map);
   }
   else if (kind === "custom" && customUrl) {
-    tileCustom = L.tileLayer(customUrl, { ...TILE_OPTS, attribution: "custom", crossOrigin: true });
+    tileCustom = L.tileLayer(customUrl, { ...TILE_OPTS, attribution: "custom", crossOrigin: "anonymous" });
     bindTileLoadIndicator(tileCustom);
     tileCustom.addTo(map);
   } else tileSatellite.addTo(map);

@@ -8,6 +8,12 @@ export default defineConfig({
         target: "http://127.0.0.1:8000",
         changeOrigin: true,
       },
+      "/basemap/esri": {
+        target: "https://server.arcgisonline.com",
+        changeOrigin: true,
+        rewrite: (path) =>
+          path.replace(/^\/basemap\/esri/, "/ArcGIS/rest/services/World_Imagery/MapServer/tile"),
+      },
     },
   },
   test: {
