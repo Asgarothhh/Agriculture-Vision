@@ -18,6 +18,14 @@ run_sudo() {
   sudo -n "$@"
 }
 
+can_sudo() {
+  if [ "$(id -u)" -eq 0 ]; then
+    return 0
+  fi
+  command -v sudo >/dev/null 2>&1 || return 1
+  sudo -n true >/dev/null 2>&1
+}
+
 reachable() {
   curl -sf --max-time 3 "$1" >/dev/null 2>&1
 }
@@ -133,6 +141,10 @@ patch_nginx_upstream() {
 }
 
 pick_upstream
+if ! can_sudo; then
+  echo "skip host nginx patch: no passwordless sudo (API reachable at ${UPSTREAM})" >&2
+  exit 0
+fi
 patch_nginx_upstream
 
 if reachable "http://127.0.0.1/api/v1/health" || reachable "http://192.168.0.118/api/v1/health"; then
