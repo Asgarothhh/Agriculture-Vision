@@ -129,13 +129,7 @@ deploy-k8s:
     - kubectl rollout status deployment/agriculture-vision-nginx -n "$KUBE_NAMESPACE" --timeout=120s
     - kubectl get pods -n "$KUBE_NAMESPACE" -o wide
     - kubectl get svc -n "$KUBE_NAMESPACE"
-    - |
-      IP="$(minikube ip)"
-      curl -sf "http://$${IP}:30800/api/v1/health"
-      curl -sf "http://$${IP}:30080/api/v1/health"
-      code="$(curl -sS -o /dev/null -w '%{http_code}' -X POST "http://$${IP}:30800/api/v1/auth/login" -H 'Content-Type: application/json' -d '{}' || true)"
-      echo "login $$code"
-      test "$$code" != "502" -a "$$code" != "000"
+    - bash deploy/smoke-cluster.sh
   after_script:
     - echo "=== ОТЛАДОЧНАЯ ИНФОРМАЦИЯ ПРИ ОШИБКЕ ==="
     - kubectl get pods -n "$KUBE_NAMESPACE" -o wide || true
