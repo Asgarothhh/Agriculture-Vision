@@ -244,22 +244,43 @@ export function clearFeatures() {
   featureGroup.clearLayers();
 }
 
+function tileUrl(src) {
+  try {
+    return new URL(src, window.location.href);
+  } catch {
+    return null;
+  }
+}
+
 async function paintTile(ctx, img, mapPos) {
   const r = img.getBoundingClientRect();
   const dx = r.left - mapPos.left;
   const dy = r.top - mapPos.top;
-  if (img.src.startsWith("blob:")) {
+  if (r.width < 1 || r.height < 1) return false;
+  const src = img.currentSrc || img.src;
+  if (!src) return false;
+  // A cross-origin <img> drawn directly taints the canvas. Firefox then rejects
+  // toBlob with "The operation is insecure." Only same-origin and CORS blobs are safe.
+  if (src.startsWith("blob:") || src.startsWith("data:")) {
     ctx.drawImage(img, dx, dy, r.width, r.height);
-    return;
+    return true;
   }
+  const url = tileUrl(src);
+  if (!url) return false;
+  if (url.origin === window.location.origin) {
+    ctx.drawImage(img, dx, dy, r.width, r.height);
+    return true;
+  }
+  const res = await fetch(url.href, { mode: "cors", credentials: "omit" });
+  if (!res.ok) return false;
+  const blob = await res.blob();
+  const bmp = await createImageBitmap(blob);
   try {
-    const res = await fetch(img.src, { mode: "cors" });
-    const blob = await res.blob();
-    const bmp = await createImageBitmap(blob);
     ctx.drawImage(bmp, dx, dy, r.width, r.height);
-  } catch {
-    ctx.drawImage(img, dx, dy, r.width, r.height);
+  } finally {
+    if (typeof bmp.close === "function") bmp.close();
   }
+  return true;
 }
 
 export async function captureMapJpeg() {
@@ -277,12 +298,20 @@ export async function captureMapJpeg() {
       const pane = map.getPane("tilePane");
       const mapPos = map.getContainer().getBoundingClientRect();
       const imgs = [...pane.querySelectorAll("img")];
-      await Promise.all(imgs.map((img) => paintTile(ctx, img, mapPos).catch(() => {})));
+      const painted = await Promise.all(imgs.map((img) => paintTile(ctx, img, mapPos).catch(() => false)));
+      if (!painted.some(Boolean)) {
+        throw new Error("Не удалось прочитать тайлы карты. Подложка с другого сайта недоступна для снимка.");
+      }
       const blob = await new Promise((resolve, reject) => {
         try {
           canvas.toBlob((b) => (b ? resolve(b) : reject(new Error("Не удалось снять кадр карты"))), "image/jpeg", 0.92);
         } catch (err) {
-          reject(err);
+          const insecure = err && (err.name === "SecurityError" || /insecure/i.test(String(err.message || "")));
+          reject(
+            insecure
+              ? new Error("Браузер запретил снимок карты: тайл подложки с другого сайта. Подключите dzz.by или откройте сайт по HTTPS.")
+              : err,
+          );
         }
       });
       return new File([blob], `map_aoi_${Date.now()}.jpg`, { type: "image/jpeg" });
