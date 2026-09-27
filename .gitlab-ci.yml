@@ -55,10 +55,19 @@ unit-tests:
 frontend-unit-tests:
   stage: test
   needs: []
+  variables:
+    NODE_IMAGE: "node:22-alpine"
   script:
-    - cd frontend
-    - npm ci
-    - npm test
+    # Shell executor has no host npm. image: is ignored here, so run Node in Docker
+    # (same tag as deploy/Dockerfile.nginx). Do not switch this runner to docker executor.
+    - |
+      docker run --rm \
+        -u "$(id -u):$(id -g)" \
+        -e HOME=/tmp \
+        -v "$PWD/frontend:/src" \
+        -w /src \
+        "$NODE_IMAGE" \
+        sh -c "npm ci && npm test"
   rules:
     - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
     - if: '$CI_COMMIT_BRANCH'
