@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from datetime import UTC, datetime
 from uuid import UUID
 
@@ -17,14 +18,37 @@ from app.ml_service.schemas import InferenceRequest
 from app.tasks_service.models import ProcessingTask
 from app.tasks_service.service import enforce_task_limit
 from app.users_service.models import ActivityLog
-from celery.signals import worker_process_init
+from app.ml_service.health_store import clear_health, publish_health
+from celery.signals import worker_process_init, worker_shutdown
 
 app = celery_app
+logger = logging.getLogger(__name__)
 
 
 @worker_process_init.connect
 def _load_weights(**kwargs) -> None:
-    load_models()
+    payload = load_models()
+    for item in payload.get("models", []):
+        logger.info(
+            "ML model %s loaded=%s weights=%s error=%s",
+            item.get("code"),
+            item.get("loaded"),
+            item.get("weights"),
+            item.get("error"),
+        )
+    try:
+        publish_health(payload)
+        logger.info("ML health published: %s", payload.get("status"))
+    except Exception:
+        logger.exception("ML health publish failed")
+
+
+@worker_shutdown.connect
+def _clear_health(**kwargs) -> None:
+    try:
+        clear_health()
+    except Exception:
+        logger.exception("ML health clear failed")
 
 
 def _utcnow() -> datetime:

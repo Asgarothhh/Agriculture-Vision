@@ -106,3 +106,64 @@ def test_infer_is_called(monkeypatch):
     result = fake_infer(runtime, b"abc", "x.png", InferenceRequest(model="segformer", confidence=0.4))
     assert called["n"] == 1
     assert result.model == "segformer"
+
+
+@pytest.fixture
+def ml_health_key(monkeypatch):
+    import uuid
+
+    from app.ml_service import health_store
+
+    monkeypatch.setattr(health_store, "KEY", f"test:ml:health:{uuid.uuid4().hex}")
+    yield health_store
+    health_store.clear_health()
+
+
+def _worker_payload(segformer_loaded: bool = True) -> dict:
+    return {
+        "status": "ready" if segformer_loaded else "unavailable",
+        "models": [
+            {"code": "yolo_seg_26", "loaded": False, "weights": None, "error": "weights file not found"},
+            {"code": "segformer", "loaded": segformer_loaded, "weights": "/app/config/segformer_best.pt", "error": None},
+        ],
+    }
+
+
+def test_health_store_roundtrip(ml_health_key):
+    ml_health_key.publish_health(_worker_payload())
+    stored = ml_health_key.read_health()
+    assert stored["status"] == "ready"
+    assert "updated_at" in stored
+    ml_health_key.clear_health()
+    assert ml_health_key.read_health() is None
+
+
+def test_api_health_uses_worker_status(ml_health_key, monkeypatch):
+    from app.core.celery_app import celery_app
+
+    runtime.reset()
+    monkeypatch.setattr(celery_app.control, "ping", lambda **_kw: [{"worker@pod": {"ok": "pong"}}])
+    ml_health_key.publish_health(_worker_payload())
+    health = ml_health_key.get_ml_health()
+    assert health["status"] == "ready"
+    seg = next(m for m in health["models"] if m["code"] == "segformer")
+    assert seg["loaded"] is True
+
+
+def test_api_health_worker_offline(ml_health_key, monkeypatch):
+    from app.core.celery_app import celery_app
+
+    runtime.reset()
+    monkeypatch.setattr(celery_app.control, "ping", lambda **_kw: [])
+    ml_health_key.publish_health(_worker_payload())
+    health = ml_health_key.get_ml_health()
+    assert health["status"] == "unavailable"
+    assert all(not m["loaded"] and m["error"] == "ML worker offline" for m in health["models"])
+
+
+def test_api_health_worker_not_reported(ml_health_key):
+    runtime.reset()
+    health = ml_health_key.get_ml_health()
+    assert health["status"] == "unavailable"
+    assert {m["code"] for m in health["models"]} == {"yolo_seg_26", "segformer"}
+    assert all(m["error"] == "ML worker has not reported model status" for m in health["models"])
