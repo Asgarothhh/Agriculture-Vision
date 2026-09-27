@@ -41,7 +41,7 @@ def test_aes256_encrypt_roundtrip():
     assert decrypt_secret(encrypted) == secret
 
 
-def test_reset_code_is_four_digits():
+def test_reset_code_is_six_digits():
     codes = {generate_reset_code() for _ in range(30)}
     assert codes
-    assert all(len(code) == 4 and code.isdigit() for code in codes)
+    assert all(len(code) == 6 and code.isdigit() for code in codes)

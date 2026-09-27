@@ -75,13 +75,6 @@ def test_password_reset_confirm_requires_six_digits():
     assert payload.code == "123456"
 
 
-def test_generated_reset_code_has_six_digits():
-    from app.core.security import generate_reset_code
-
-    codes = {generate_reset_code() for _ in range(50)}
-    assert all(len(code) == 6 and code.isdigit() for code in codes)
-
-
 def test_openapi_has_auth_and_profile_paths(client):
     spec = client.get("/api/v1/openapi.json").json()
     paths = spec["paths"]
