@@ -1,5 +1,5 @@
 import * as tasksApi from "../api/tasks.js";
-import { $, confirmModal, showToast, dbg } from "../ui.js";
+import { $, confirmModal, showToast } from "../ui.js";
 import { captureMapJpeg, clearAoi, getAoiGeoJson, getViewBounds } from "../map/map.js";
 import { loadMapData, selectedClassIds } from "../layers/store.js";
 import { clearUndo } from "../map/undo.js";
@@ -87,17 +87,11 @@ export async function startUploadProcessing() {
 }
 
 export async function runSegmentation(architecture) {
-  // #region agent log
-  dbg("H3", "seg-start", { architecture, status: $("map-seg-status")?.textContent });
-  // #endregion
   setProgress("map-seg-progress-bar", "map-seg-progress", 8);
   try {
     if ($("map-seg-status")) $("map-seg-status").textContent = "Захват карты…";
     const health = await tasksApi.modelsHealth();
     const loaded = (health.models || []).filter((m) => m.loaded).map((m) => m.code);
-    // #region agent log
-    dbg("H4", "seg-health", { status: health.status, loaded, architecture });
-    // #endregion
     const code = architecture === "yolo" ? "yolo_seg_26" : "segformer";
     if (health.status !== "ready") throw new Error(health.detail || "На ML-сервере нет весов моделей");
     if (!loaded.includes(code) && loaded.length) {
@@ -105,9 +99,6 @@ export async function runSegmentation(architecture) {
     }
     setProgress("map-seg-progress-bar", "map-seg-progress", 18);
     const file = await captureMapJpeg();
-    // #region agent log
-    dbg("H3", "seg-captured", { bytes: file?.size, type: file?.type });
-    // #endregion
     setProgress("map-seg-progress-bar", "map-seg-progress", 30);
     if ($("map-seg-status")) $("map-seg-status").textContent = "Отправка на сервер…";
     const geoBounds = getViewBounds();
@@ -117,9 +108,6 @@ export async function runSegmentation(architecture) {
     showToast("Сегментация завершена");
     clearAoi();
   } catch (err) {
-    // #region agent log
-    dbg("H3", "seg-error", { message: err?.message, stuck: $("map-seg-status")?.textContent });
-    // #endregion
     showToast(err.message, true);
     if ($("map-seg-status")) $("map-seg-status").textContent = err.message;
   } finally {
@@ -144,13 +132,7 @@ export async function refreshMlHealth() {
       el.classList.add("status-idle");
     }
     el.title = JSON.stringify(health);
-    // #region agent log
-    dbg("H4", "ml-health", { status: health.status, loaded, text: el.textContent, className: el.className });
-    // #endregion
-  } catch (err) {
-    // #region agent log
-    dbg("H4", "ml-health-fail", { message: err?.message });
-    // #endregion
+  } catch {
     el.textContent = "ML недоступен";
     el.classList.remove("status-online");
     el.classList.add("status-idle");

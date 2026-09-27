@@ -22,3 +22,4 @@ data:
   DZZ_SESSIONS_PATH: "data/dzz-sessions.enc"
   HF_HOME: "/app/.cache/huggingface"
   TRANSFORMERS_CACHE: "/app/.cache/huggingface"
+  YOLO_CONFIG_DIR: "/tmp/Ultralytics"

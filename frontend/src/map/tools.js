@@ -1,4 +1,4 @@
-import { showToast, openAppModal, closeAppModal, $, dbg } from "../ui.js";
+import { showToast, openAppModal, closeAppModal, $ } from "../ui.js";
 import * as layersApi from "../api/layers.js";
 import {
   loadMapData,
@@ -780,9 +780,6 @@ export function toggleLabelsAndCoords() {
 export function setTool(name) {
   detach();
   active = name || "select";
-  // #region agent log
-  dbg("H5", "set-tool", { active });
-  // #endregion
   document.querySelectorAll(".tool-btn").forEach((btn) => {
     btn.classList.toggle("active", btn.dataset.tool === active);
   });

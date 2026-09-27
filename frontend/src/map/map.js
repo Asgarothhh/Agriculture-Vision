@@ -72,9 +72,6 @@ export function initMap() {
     return map;
   }
   map = L.map("map", { zoomControl: false }).setView(DEFAULT_CENTER, DEFAULT_ZOOM);
-  // #region agent log
-  window.__avMap = map;
-  // #endregion
   L.control.zoom({ position: "bottomleft" }).addTo(map);
   tileSatellite = L.tileLayer(
     "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",

@@ -21,7 +21,7 @@ spec:
         - name: celery-worker
           image: WORKER_IMAGE_PLACEHOLDER
           imagePullPolicy: IfNotPresent
-          command: ["celery", "-A", "app.core.celery_app", "worker", "-l", "info", "--concurrency=2"]
+          command: ["celery", "-A", "app.core.celery_app", "worker", "-Q", "ml-gpu,cpu", "-l", "info", "--concurrency=1"]
           envFrom:
             - configMapRef:
                 name: agri-config

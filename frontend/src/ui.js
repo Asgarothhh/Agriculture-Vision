@@ -2,30 +2,10 @@ export function $(id) {
   return document.getElementById(id);
 }
 
-// #region agent log
-export function dbg(hypothesisId, message, data = {}) {
-  fetch("http://127.0.0.1:7736/ingest/1d8ffe87-0e5a-44d2-a8e9-d55263d58199", {
-    method: "POST",
-    headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "14c4e4" },
-    body: JSON.stringify({
-      sessionId: "14c4e4",
-      hypothesisId,
-      location: "frontend",
-      message,
-      data,
-      timestamp: Date.now(),
-    }),
-  }).catch(() => {});
-}
-// #endregion
-
 const ICON_EYE = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7S1 12 1 12z"></path><circle cx="12" cy="12" r="3"></circle></svg>`;
 const ICON_EYE_OFF = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M17.94 17.94A10.94 10.94 0 0 1 12 19c-7 0-11-7-11-7a21.8 21.8 0 0 1 5.06-5.94"></path><path d="M9.9 4.24A10.94 10.94 0 0 1 12 5c7 0 11 7 11 7a21.8 21.8 0 0 1-2.16 3.19"></path><path d="M14.12 14.12a3 3 0 0 1-4.24-4.24"></path><line x1="1" y1="1" x2="23" y2="23"></line></svg>`;
 
 export function showToast(message, isError = false) {
-  // #region agent log
-  dbg(isError ? "H3" : "UI", isError ? "toast-error" : "toast", { message: String(message || "").slice(0, 200) });
-  // #endregion
   const text = String(message || "");
   const targets = [$("toast"), $("global-toast")].filter(Boolean);
   targets.forEach((el) => {
@@ -74,9 +54,6 @@ export function setFormError(id, message) {
 }
 
 export function openAppModal({ title, bodyHtml, actions }) {
-  // #region agent log
-  dbg("H7", "modal-open", { title, actionCount: (actions || []).length });
-  // #endregion
   $("app-modal-title").textContent = title;
   $("app-modal-body").innerHTML = bodyHtml;
   const box = $("app-modal-actions");

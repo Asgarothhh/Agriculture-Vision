@@ -25,6 +25,13 @@ spec:
           envFrom:
             - configMapRef:
                 name: agri-config
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "256Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
       containers:
         - name: fastapi-api
           image: API_IMAGE_PLACEHOLDER

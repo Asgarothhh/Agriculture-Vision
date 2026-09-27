@@ -1,4 +1,5 @@
 stages:
+  - test
   - build
   - deploy
 
@@ -8,9 +9,63 @@ variables:
   WORKER_IMAGE: "agriculture-vision-worker"
   NGINX_IMAGE: "agriculture-vision-nginx"
 
+unit-tests:
+  stage: test
+  needs: []
+  variables:
+    POSTGRES_USER: "developer"
+    POSTGRES_PASSWORD: "developer"
+    POSTGRES_DB: "agriculture-vision"
+    TEST_PG_PORT: "55432"
+    TEST_REDIS_PORT: "56379"
+  script:
+    - |
+      if [ -n "${ENV_FILE:-}" ] && [ -f "$ENV_FILE" ]; then
+        cp "$ENV_FILE" .env
+      elif [ -f .env.example ]; then
+        cp .env.example .env
+      fi
+    - export DATABASE_URL="postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@127.0.0.1:${TEST_PG_PORT}/${POSTGRES_DB}"
+    - export DATABASE_SYNC_URL="postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@127.0.0.1:${TEST_PG_PORT}/${POSTGRES_DB}"
+    - export REDIS_URL="redis://127.0.0.1:${TEST_REDIS_PORT}/0"
+    - export POSTGRES_HOST="127.0.0.1"
+    - export POSTGRES_PORT="$TEST_PG_PORT"
+    - docker rm -f agri-test-postgres agri-test-redis || true
+    - docker run -d --name agri-test-postgres -p 127.0.0.1:${TEST_PG_PORT}:5432 -e POSTGRES_USER="$POSTGRES_USER" -e POSTGRES_PASSWORD="$POSTGRES_PASSWORD" -e POSTGRES_DB="$POSTGRES_DB" postgis/postgis:15-3.4
+    - docker run -d --name agri-test-redis -p 127.0.0.1:${TEST_REDIS_PORT}:6379 redis:7-alpine
+    - |
+      for i in $(seq 1 30); do
+        docker exec agri-test-postgres pg_isready -U "$POSTGRES_USER" -d "$POSTGRES_DB" && break
+        sleep 2
+      done
+    - export GDAL_VERSION="$(gdal-config --version 2>/dev/null || true)"
+    - if [ ! -d ".venv" ]; then python3 -m venv .venv; fi
+    - source .venv/bin/activate
+    - pip install --upgrade pip
+    - pip install -r requirements.txt
+    - alembic upgrade head
+    - python -m app.core.seed
+    - pytest tests/ -m "not ml" -q
+  after_script:
+    - docker rm -f agri-test-postgres agri-test-redis || true
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH'
+
+frontend-unit-tests:
+  stage: test
+  needs: []
+  script:
+    - cd frontend
+    - npm ci
+    - npm test
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH'
+
 build-images:
   stage: build
-  needs: []
+  needs: ["unit-tests", "frontend-unit-tests"]
   cache:
     key: agrovision-model-weights
     paths:
@@ -75,9 +130,21 @@ deploy-k8s:
       test "$code" != "502" -a "$code" != "000"
   after_script:
     - echo "=== ОТЛАДОЧНАЯ ИНФОРМАЦИЯ ПРИ ОШИБКЕ ==="
-    - kubectl get pods -n "$KUBE_NAMESPACE" -l app=agri-worker
-    - kubectl describe pods -n "$KUBE_NAMESPACE" -l app=agri-worker
+    - kubectl get pods -n "$KUBE_NAMESPACE" -o wide || true
+    - kubectl get events -n "$KUBE_NAMESPACE" --sort-by='.lastTimestamp' | tail -40 || true
+    - echo "=== API ==="
+    - kubectl get pods -n "$KUBE_NAMESPACE" -l app=agri-api || true
+    - kubectl describe pods -n "$KUBE_NAMESPACE" -l app=agri-api || true
+    - kubectl logs -n "$KUBE_NAMESPACE" -l app=agri-api -c migrate --tail=100 || true
+    - kubectl logs -n "$KUBE_NAMESPACE" -l app=agri-api -c fastapi-api --tail=100 || true
+    - echo "=== WORKER ==="
+    - kubectl get pods -n "$KUBE_NAMESPACE" -l app=agri-worker || true
+    - kubectl describe pods -n "$KUBE_NAMESPACE" -l app=agri-worker || true
     - kubectl logs -n "$KUBE_NAMESPACE" -l app=agri-worker --tail=100 || true
+    - echo "=== NGINX ==="
+    - kubectl get pods -n "$KUBE_NAMESPACE" -l app=agri-nginx || true
+    - kubectl describe pods -n "$KUBE_NAMESPACE" -l app=agri-nginx || true
+    - kubectl logs -n "$KUBE_NAMESPACE" -l app=agri-nginx --tail=50 || true
   rules:
     - if: '$CI_COMMIT_BRANCH == "dev"'
     - if: '$CI_COMMIT_BRANCH == "main"'

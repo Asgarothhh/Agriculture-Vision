@@ -56,9 +56,6 @@ def load_segformer_checkpoint(
     target_keys = set(model.state_dict().keys())
     state = remap_segformer_state_dict(raw_state, target_keys)
     state = _inflate_first_conv_3ch_to_4ch(state)
-    # #region agent log
-    
-    # #endregion
     incompatible = model.load_state_dict(state, strict=False)
     missing = list(incompatible.missing_keys)
     unexpected = list(incompatible.unexpected_keys)

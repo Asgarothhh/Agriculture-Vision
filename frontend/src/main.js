@@ -9,7 +9,7 @@ import {
   setAuthCallbacks,
   toggleMode,
 } from "./auth/session.js";
-import { bindPasswordToggles, closeAppModal, $, showToast, dbg } from "./ui.js";
+import { bindPasswordToggles, closeAppModal, $, showToast } from "./ui.js";
 import {
   applyDisplaySettings,
   applyLiveStyles,
@@ -358,43 +358,6 @@ function bindUi() {
 bindPasswordToggles();
 bindUi();
 bindHotkeys();
-
-// #region agent log
-document.addEventListener(
-  "click",
-  (event) => {
-    const t = event.target?.closest?.("[id], .tool-btn, .icon-btn, button, a, select");
-    if (!t) return;
-    dbg("UI", "click", {
-      id: t.id || "",
-      cls: String(t.className || "").slice(0, 80),
-      text: String(t.textContent || "").replace(/\s+/g, " ").trim().slice(0, 80),
-      tool: t.dataset?.tool,
-      panel: t.dataset?.panel,
-      mapClass: document.getElementById("map-area")?.className,
-      dzzClass: document.getElementById("status-dzz")?.className,
-      dzzText: document.getElementById("status-dzz")?.textContent,
-      mlText: document.getElementById("status-ml")?.textContent,
-      zoom: document.getElementById("tile-display")?.textContent,
-      sidebar: document.getElementById("sidebar-panel-wrap")?.className,
-    });
-  },
-  true,
-);
-window.addEventListener("error", (event) => {
-  dbg("H3", "window-error", { msg: event.message, src: event.filename, line: event.lineno });
-});
-window.addEventListener("unhandledrejection", (event) => {
-  dbg("H3", "unhandledrejection", { msg: String(event.reason?.message || event.reason || "").slice(0, 200) });
-});
-["prompt", "confirm", "alert"].forEach((name) => {
-  const orig = window[name];
-  window[name] = function (...args) {
-    dbg("H1", `native-${name}`, { args: args.map((a) => String(a).slice(0, 80)) });
-    return orig.apply(this, args);
-  };
-});
-// #endregion
 
 if (!getAccessToken()) {
   document.getElementById("screen-auth").style.display = "";

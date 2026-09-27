@@ -1,6 +1,6 @@
 import { clearTokens, getAccessToken } from "../api/client.js";
 import * as authApi from "../api/auth.js";
-import { $, closeAppModal, confirmModal, initials, openAppModal, setFormError, showForm, showScreen, showToast, dbg } from "../ui.js";
+import { $, closeAppModal, confirmModal, initials, openAppModal, setFormError, showForm, showScreen, showToast } from "../ui.js";
 import { resetDisplaySettings } from "../layers/store.js";
 
 let currentUser = null;
@@ -47,9 +47,6 @@ export async function restoreSession() {
     applyUser(me);
     showScreen("app");
     await onReady(me);
-    // #region agent log
-    dbg("H4", "session-ready", { email: me?.email, role: me?.role });
-    // #endregion
     return true;
   } catch {
     showScreen("auth");
