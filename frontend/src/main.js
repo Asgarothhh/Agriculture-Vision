@@ -35,9 +35,10 @@ import {
   handleUploadFile,
   onSegArchitectureChange,
   onSegThresholdInput,
-  refreshMlHealth,
   runSegmentation,
+  startMlHealthPolling,
   startUploadProcessing,
+  stopMlHealthPolling,
 } from "./tasks/runner.js";
 import {
   applyWmtsSelection,
@@ -53,7 +54,8 @@ import {
   testDzzAccess,
 } from "./dzz/panel.js";
 import { exportLayers } from "./export/download.js";
-import { deleteAccount, renderHistoryFeed, saveProfile } from "./account/profile.js";
+import { deleteAccount, refreshAccountStats, renderHistoryFeed, saveProfile } from "./account/profile.js";
+import { CLASS_CHECKBOXES } from "./layers/store.js";
 
 function toggleSidebarPanel() {
   const wrap = $("sidebar-panel-wrap");
@@ -93,7 +95,10 @@ function switchMainTab(name) {
   $("view-account").style.display = name === "account" ? "flex" : "none";
   $("view-map").classList.toggle("active", name === "map");
   $("view-account").classList.toggle("active", name === "account");
-  if (name === "account") renderHistoryFeed();
+  if (name === "account") {
+    renderHistoryFeed();
+    refreshAccountStats();
+  }
   if (name === "map") setTimeout(() => initMap().invalidateSize(), 50);
 }
 
@@ -122,8 +127,9 @@ async function onAppReady() {
   activateMapTool("select");
   await loadMapData();
   populateCropSelect();
-  await refreshMlHealth();
+  startMlHealthPolling();
   startDzzPolling();
+  restoreClassCheckboxes();
   const savedArch = localStorage.getItem("ttz_ml_architecture");
   if (savedArch) {
     const radio = document.querySelector(`input[name="seg-architecture"][value="${savedArch}"]`);
@@ -143,6 +149,37 @@ async function onAppReady() {
 
 function onAppLogout() {
   stopDzzPolling();
+  stopMlHealthPolling();
+}
+
+const CLASS_STORAGE_KEY = "ttz_class_checkboxes";
+
+/** Recognition categories (settings) survive a reload, like the other settings. */
+function restoreClassCheckboxes() {
+  let saved = null;
+  try {
+    saved = JSON.parse(localStorage.getItem(CLASS_STORAGE_KEY) || "null");
+  } catch {
+    saved = null;
+  }
+  Object.keys(CLASS_CHECKBOXES).forEach((id) => {
+    const box = $(id);
+    if (!box) return;
+    if (saved && typeof saved[id] === "boolean") box.checked = saved[id];
+    box.onchange = saveClassCheckboxes;
+  });
+}
+
+function saveClassCheckboxes() {
+  const state = {};
+  Object.keys(CLASS_CHECKBOXES).forEach((id) => {
+    if ($(id)) state[id] = $(id).checked;
+  });
+  try {
+    localStorage.setItem(CLASS_STORAGE_KEY, JSON.stringify(state));
+  } catch {
+    /* storage unavailable: the choice lives until reload */
+  }
 }
 
 setAuthCallbacks({ ready: onAppReady, logout: onAppLogout });

@@ -45,7 +45,7 @@ async def list_models(
 async def models_health(_: Annotated[User, Depends(get_current_user)]):
     payload = await run_in_threadpool(get_ml_health)
     status = payload.get("status") or "unavailable"
-    if status not in {"ready", "unavailable"}:
+    if status not in {"ready", "loading", "unavailable"}:
         status = "ready" if status in {"ok", "healthy"} else "unavailable"
     return {"status": status, "models": payload.get("models") or []}
 

@@ -1,6 +1,6 @@
 import { dzzEnsureTileBlob, dzzPrefetch } from "../dzz/tiles.js";
 import { getActiveBasemapTileUrl, toSameOriginDzzUrl } from "../dzz/urls.js";
-import { isSecurityError, withTimeout } from "../ui.js";
+import { escapeHtml, isSecurityError, withTimeout } from "../ui.js";
 
 const DEFAULT_CENTER = [53.9, 27.55];
 const DEFAULT_ZOOM = 13;
@@ -244,7 +244,7 @@ export function addGeoJsonObject(obj, style) {
     L.DomEvent.on(part, "click", (ev) => L.DomEvent.stopPropagation(ev));
     const showLabels = document.getElementById("opt-field-labels")?.checked !== false;
     if (showLabels && obj.name) {
-      part.bindTooltip(obj.name, { permanent: true, direction: "center", className: "field-label" });
+      part.bindTooltip(escapeHtml(obj.name), { permanent: true, direction: "center", className: "field-label" });
     }
   });
   featureGroup.addLayer(layer);
@@ -253,6 +253,24 @@ export function addGeoJsonObject(obj, style) {
 
 export function clearFeatures() {
   featureGroup.clearLayers();
+}
+
+let resultOverlay = null;
+
+/** Show a saved processing result (FeatureCollection, EPSG:4326) on top of the map. */
+export function showResultOverlay(geojson) {
+  if (!map) return 0;
+  if (resultOverlay) map.removeLayer(resultOverlay);
+  const features = (geojson?.features || []).filter((f) => f?.geometry);
+  resultOverlay = L.geoJSON(
+    { type: "FeatureCollection", features },
+    {
+      style: () => ({ color: "#e14059", weight: 2, dashArray: "4 3", fillOpacity: 0.15 }),
+      pointToLayer: (_f, latlng) => L.circleMarker(latlng, { radius: 6, color: "#e14059", fillOpacity: 0.8 }),
+    },
+  ).addTo(map);
+  if (features.length) map.fitBounds(resultOverlay.getBounds(), { padding: [30, 30], maxZoom: 17 });
+  return features.length;
 }
 
 const TILE_FETCH_TIMEOUT_MS = 8000;

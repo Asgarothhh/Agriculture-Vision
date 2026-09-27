@@ -73,5 +73,8 @@ def get_ml_health() -> dict[str, Any]:
     if remote is None:
         return _unavailable(local, "ML worker has not reported model status")
     if not _worker_alive():
-        return _unavailable(remote, "ML worker offline")
+        return _unavailable(remote if remote.get("models") else local, "ML worker offline")
+    if remote.get("status") == "loading":
+        loading = _unavailable(local, "Модели загружаются на ML-сервере")
+        return {**loading, "status": "loading"}
     return {"status": remote.get("status") or "unavailable", "models": remote.get("models") or []}

@@ -35,17 +35,26 @@ export function rememberEnabled() {
   return localStorage.getItem(REMEMBER_KEY) === "1";
 }
 
+function cleanMessage(text) {
+  // Pydantic v2 prefixes validator messages: "Value error, Пароли не совпадают".
+  return String(text).replace(/^Value error,\s*/i, "");
+}
+
 export function formatDetail(payload) {
   if (!payload) return "Ошибка запроса";
   const detail = payload.detail;
-  if (typeof detail === "string") return detail;
+  if (typeof detail === "string") return cleanMessage(detail);
   if (Array.isArray(detail)) {
     return detail
-      .map((item) => item?.msg || item?.detail || JSON.stringify(item))
+      .map((item) => cleanMessage(item?.msg || item?.detail || JSON.stringify(item)))
       .join("; ");
   }
   if (detail && typeof detail === "object") return JSON.stringify(detail);
-  return payload.message || "Ошибка запроса";
+  // slowapi answers 429 with {"error": "Rate limit exceeded: 5 per 1 minute"}.
+  if (typeof payload.error === "string" && /rate limit/i.test(payload.error)) {
+    return "Слишком много попыток — подождите минуту и повторите";
+  }
+  return payload.message || payload.error || "Ошибка запроса";
 }
 
 export class ApiError extends Error {
@@ -86,7 +95,7 @@ async function parseBody(res) {
   return res.blob();
 }
 
-async function rawFetch(path, options = {}, { skipAuth = false, skipRefresh = false } = {}) {
+async function rawFetch(path, options = {}, { skipAuth = false, skipRefresh = false, withHeaders = false } = {}) {
   const headers = new Headers(options.headers || {});
   if (!skipAuth) {
     const token = getAccessToken();
@@ -99,13 +108,13 @@ async function rawFetch(path, options = {}, { skipAuth = false, skipRefresh = fa
   const payload = await parseBody(res);
   if (res.status === 401 && !skipRefresh && !skipAuth && isAuthTokenError(payload)) {
     const refreshed = await refreshAccessToken();
-    if (refreshed) return rawFetch(path, options, { skipAuth, skipRefresh: true });
+    if (refreshed) return rawFetch(path, options, { skipAuth, skipRefresh: true, withHeaders });
   }
   if (!res.ok) {
     const detail = formatDetail(payload) || `HTTP ${res.status}`;
     throw new ApiError(res.status, detail, payload);
   }
-  return payload;
+  return withHeaders ? { payload, headers: res.headers } : payload;
 }
 
 export async function refreshAccessToken() {
@@ -136,6 +145,11 @@ export async function refreshAccessToken() {
 
 export function api(path, options) {
   return rawFetch(path, options);
+}
+
+/** Like api(), but resolves to { payload, headers } for responses whose headers matter. */
+export function apiWithHeaders(path, options) {
+  return rawFetch(path, options, { withHeaders: true });
 }
 
 export function apiNoAuth(path, options) {

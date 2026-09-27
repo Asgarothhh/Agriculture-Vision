@@ -48,6 +48,12 @@ def ensure_bucket() -> None:
         client.create_bucket(Bucket=settings.s3_bucket)
 
 
+def _local_fallback_allowed() -> bool:
+    # Pods do not share a disk: a file the API "saves locally" is invisible to the
+    # worker, so in prod a storage failure must surface instead of being hidden.
+    return get_settings().app_env != "prod"
+
+
 def _put_local(key: str, data: bytes) -> str:
     _local_path(key).write_bytes(data)
     logger.warning("S3 unavailable, stored %s on disk", key)
@@ -67,6 +73,9 @@ def upload_fileobj(key: str, fileobj: BinaryIO, content_type: str = "application
         )
         return key
     except Exception as exc:
+        if not _local_fallback_allowed():
+            logger.error("S3 upload of %s failed: %s", key, exc)
+            raise
         logger.warning("S3 upload failed (%s), using local storage", exc)
         return _put_local(key, payload)
 
@@ -83,6 +92,9 @@ def upload_bytes(key: str, data: bytes, content_type: str = "application/octet-s
         )
         return key
     except Exception as exc:
+        if not _local_fallback_allowed():
+            logger.error("S3 upload of %s failed: %s", key, exc)
+            raise
         logger.warning("S3 upload failed (%s), using local storage", exc)
         return _put_local(key, data)
 

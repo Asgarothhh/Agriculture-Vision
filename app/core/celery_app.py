@@ -22,6 +22,7 @@ celery_app.conf.update(
     task_track_started=True,
     task_acks_late=True,
     worker_prefetch_multiplier=1,
+    worker_proc_alive_timeout=settings.ml_worker_boot_timeout,
     task_default_queue=settings.celery_queue_cpu,
     task_routes={
         "app.tasks_service.workers.run_inference": {"queue": settings.celery_queue_gpu},

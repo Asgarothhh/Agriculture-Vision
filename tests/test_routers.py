@@ -62,7 +62,7 @@ def test_auth_login_refresh_me(client):
         "/api/v1/auth/password-reset/confirm",
         json={
             "email": email,
-            "code": "0000",
+            "code": "000000",
             "new_password": "ValidPass2!",
             "new_password_repeat": "ValidPass2!",
         },
@@ -74,6 +74,24 @@ def test_activity_list(client, auth_headers):
     response = client.get("/api/v1/activity/", headers=auth_headers)
     assert response.status_code == 200
     assert "items" in response.json()
+
+
+def test_activity_filters_by_several_categories(client, auth_headers):
+    layer = client.post("/api/v1/layers/", headers=auth_headers, json={"name": "Фильтр", "color": "#123456"}).json()
+    ring = [[27.45, 53.88], [27.46, 53.88], [27.46, 53.89], [27.45, 53.88]]
+    client.post(
+        f"/api/v1/layers/{layer['id']}/objects",
+        headers=auth_headers,
+        json={"name": "Поле", "geom": {"type": "Polygon", "coordinates": [ring]}, "origin": "manual"},
+    )
+    both = client.get(
+        "/api/v1/activity/", headers=auth_headers, params=[("category", "account"), ("category", "map_tools")]
+    ).json()
+    assert {item["category"] for item in both["items"]} == {"account", "map_tools"}
+    only_export = client.get("/api/v1/activity/", headers=auth_headers, params={"category": "export"}).json()
+    assert only_export["items"] == []
+    assert only_export["total"] == 0
+    assert only_export["total_all"] >= both["total"] > 0
 
 
 def test_layers_folders_objects_merge(client, auth_headers):
@@ -212,6 +230,42 @@ def test_patch_me_password_requires_current(client, auth_headers):
     assert wrong.status_code == 403
 
 
+def test_patch_me_password_change_revokes_sessions(client):
+    email = f"pw-{uuid.uuid4().hex[:10]}@example.com"
+    registered = client.post(
+        "/api/v1/auth/register",
+        json={
+            "first_name": "Тест", "last_name": "Пароль", "email": email, "organization": "КФХ",
+            "role": "Агроном", "password": "ValidPass1!", "password_repeat": "ValidPass1!",
+        },
+    )
+    assert registered.status_code == 200, registered.text
+    tokens = registered.json()
+    headers = {"Authorization": f"Bearer {tokens['access_token']}"}
+
+    same = client.patch(
+        "/api/v1/users/me",
+        headers=headers,
+        json={"current_password": "ValidPass1!", "password": "ValidPass1!", "password_repeat": "ValidPass1!"},
+    )
+    assert same.status_code == 400
+
+    changed = client.patch(
+        "/api/v1/users/me",
+        headers=headers,
+        json={"current_password": "ValidPass1!", "password": "ValidPass2!", "password_repeat": "ValidPass2!"},
+    )
+    assert changed.status_code == 200, changed.text
+    stale = client.post("/api/v1/auth/refresh", json={"refresh_token": tokens["refresh_token"]})
+    assert stale.status_code == 401
+    old_login = client.post("/api/v1/auth/login", json={"email": email, "password": "ValidPass1!"})
+    assert old_login.status_code == 401
+    new_login = client.post("/api/v1/auth/login", json={"email": email, "password": "ValidPass2!"})
+    assert new_login.status_code == 200
+    history = client.get("/api/v1/activity/", headers=headers, params={"q": "Пароль изменён"}).json()
+    assert history["items"]
+
+
 def test_import_export(client, auth_headers):
     geojson = {
         "type": "FeatureCollection",
@@ -229,6 +283,53 @@ def test_import_export(client, auth_headers):
     exported = client.post("/api/v1/layers/export", headers=auth_headers, json={"format": "geojson"})
     assert exported.status_code == 200
     assert exported.headers["content-type"].startswith("application/")
+    assert int(exported.headers["x-exported-count"]) >= 1
+    me = client.get("/api/v1/users/me", headers=auth_headers).json()
+    assert me["exports_count"] == 1  # the import itself is not an export
+    history = client.get("/api/v1/activity/", headers=auth_headers, params={"category": "map_tools"}).json()
+    assert any("import.geojson" in item["action"] for item in history["items"])
+
+
+def test_layer_can_leave_folder_and_foreign_folder_is_rejected(client, auth_headers):
+    layer = client.post("/api/v1/layers/", headers=auth_headers, json={"name": "В папке", "color": "#123456"}).json()
+    folder = client.post("/api/v1/folders/", headers=auth_headers, json={"name": "Папка"}).json()
+    moved = client.patch(f"/api/v1/layers/{layer['id']}", headers=auth_headers, json={"folder_id": folder["id"]})
+    assert moved.json()["folder_id"] == folder["id"]
+    renamed = client.patch(f"/api/v1/layers/{layer['id']}", headers=auth_headers, json={"name": "Всё ещё в папке"})
+    assert renamed.json()["folder_id"] == folder["id"]
+    detached = client.patch(f"/api/v1/layers/{layer['id']}", headers=auth_headers, json={"folder_id": None})
+    assert detached.json()["folder_id"] is None
+    foreign = client.patch(
+        f"/api/v1/layers/{layer['id']}", headers=auth_headers, json={"folder_id": str(uuid.uuid4())}
+    )
+    assert foreign.status_code == 404
+
+
+def test_import_rejects_empty_and_broken_files(client, auth_headers):
+    before = client.get("/api/v1/layers/", headers=auth_headers).json()
+    empty = {"type": "FeatureCollection", "features": []}
+    cases = [
+        ("empty.geojson", json.dumps(empty).encode("utf-8"), "нет объектов"),
+        ("broken.geojson", b"{not json", "Не удалось прочитать"),
+        ("list.geojson", b"[1, 2]", "Не удалось прочитать"),
+    ]
+    for name, content, message in cases:
+        response = client.post(
+            "/api/v1/layers/import", headers=auth_headers, files={"file": (name, content, "application/geo+json")}
+        )
+        assert response.status_code == 400, (name, response.text)
+        assert message in response.json()["detail"]
+    after = client.get("/api/v1/layers/", headers=auth_headers).json()
+    assert len(after) == len(before)  # no ghost layer
+
+
+def test_export_without_objects_is_conflict(client, auth_headers):
+    layers = client.get("/api/v1/layers/", headers=auth_headers).json()
+    for layer in layers:
+        client.patch(f"/api/v1/layers/{layer['id']}", headers=auth_headers, json={"is_visible": False})
+    response = client.post("/api/v1/layers/export", headers=auth_headers, json={"format": "shapefile"})
+    assert response.status_code == 409
+    assert response.json()["detail"] == "Нет объектов для экспорта"
 
 
 def test_models_and_classes(client, auth_headers):

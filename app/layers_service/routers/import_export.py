@@ -30,9 +30,13 @@ async def export_layers(
     current: Annotated[User, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ):
-    content, media, filename = await service.export_layers(db, current, payload)
+    content, media, filename, count = await service.export_layers(db, current, payload)
     return Response(
         content=content,
         media_type=media,
-        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "X-Exported-Count": str(count),
+            "Access-Control-Expose-Headers": "X-Exported-Count",
+        },
     )

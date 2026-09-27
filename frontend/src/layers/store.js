@@ -1,5 +1,5 @@
 import * as layersApi from "../api/layers.js";
-import { $, confirmModal, openAppModal, closeAppModal, showToast } from "../ui.js";
+import { $, confirmModal, escapeHtml, openAppModal, closeAppModal, showToast } from "../ui.js";
 import {
   addGeoJsonObject,
   clearFeatures,
@@ -30,22 +30,59 @@ export function allObjectRecords() {
   return [...objectIndex.values()];
 }
 
-export function selectedClassIds() {
-  return layers.filter((l) => l.kind === "auto" && l.is_visible !== false && l.class_id != null).map((l) => l.class_id);
+// Settings → «Категории распознавания» checkboxes → ObjectClass ids (app/core/seed.py).
+// Spec 5.3: a switched-off category is not put on the map even if the model finds it.
+export const CLASS_CHECKBOXES = {
+  "opt-crops": [2],
+  "opt-double-sow": [21],
+  "opt-withering": [22],
+  "opt-edge-strip": [23],
+  "opt-flood": [4],
+  "opt-watercourse": [24],
+  "opt-weeds": [25],
+  "opt-seeder-skip": [26],
+  "opt-obstacle": [5, 6],
+  "opt-nutrition": [27],
+  "opt-hail": [28],
+};
+
+export function selectedClassIds(root = document) {
+  const ids = [];
+  let present = 0;
+  Object.entries(CLASS_CHECKBOXES).forEach(([id, classIds]) => {
+    const box = root.getElementById?.(id);
+    if (!box) return;
+    present += 1;
+    if (box.checked) ids.push(...classIds);
+  });
+  // No settings panel in the DOM: fall back to every auto category.
+  if (!present) return layers.filter((l) => l.kind === "auto" && l.class_id != null).map((l) => l.class_id);
+  return ids;
 }
 
 function isAuto(layer) {
   return layer.kind === "auto";
 }
 
+let loadSeq = 0;
+
 export async function loadMapData() {
-  layers = await layersApi.listLayers();
-  folders = await layersApi.listFolders();
+  // Overlapping reloads (quick clicks) must not both draw: only the latest one renders.
+  const seq = ++loadSeq;
+  const nextLayers = await layersApi.listLayers();
+  const nextFolders = await layersApi.listFolders();
+  const perLayer = [];
+  for (const layer of nextLayers) {
+    if (layer.is_visible === false) continue;
+    perLayer.push([layer, await layersApi.listLayerObjects(layer.id)]);
+    if (seq !== loadSeq) return;
+  }
+  if (seq !== loadSeq) return;
+  layers = nextLayers;
+  folders = nextFolders;
   clearFeatures();
   objectIndex = new Map();
-  for (const layer of layers) {
-    if (layer.is_visible === false) continue;
-    const objects = await layersApi.listLayerObjects(layer.id);
+  for (const [layer, objects] of perLayer) {
     for (const obj of objects) {
       const leaflet = addGeoJsonObject({ ...obj, layer_id: layer.id }, styleFor(layer));
       objectIndex.set(obj.id, { obj, layer, leaflet });
@@ -93,7 +130,7 @@ export function renderLayersList(filter = "") {
       <div class="folder-block" data-folder-id="${folder.id}">
         <div class="layer-item" data-folder-id="${folder.id}">
           <button type="button" class="mini-btn collapse-icon" data-act="toggle-folder" data-id="${folder.id}">▾</button>
-          <span>📁 ${folder.name}</span>
+          <span>📁 ${escapeHtml(folder.name)}</span>
           <div class="layer-item-actions">
             <button type="button" class="mini-btn" data-act="ren-folder" data-id="${folder.id}" title="Переименовать">✎</button>
             <button type="button" class="mini-btn" data-act="del-folder" data-id="${folder.id}" title="Удалить">✕</button>
@@ -122,8 +159,8 @@ function layerRow(layer, locked) {
     <div class="layer-item ${layer.is_visible === false ? "off" : ""} ${locked ? "locked" : ""}" data-layer-id="${layer.id}">
       <label>
         <input type="checkbox" data-act="vis" data-id="${layer.id}" ${layer.is_visible === false ? "" : "checked"}>
-        <span style="color:${layer.color}">●</span>
-        <span class="layer-name">${layer.name}</span>
+        <span style="color:${escapeHtml(layer.color)}">●</span>
+        <span class="layer-name">${escapeHtml(layer.name)}</span>
         ${locked ? "<small>auto</small>" : ""}
         <small class="layer-count">${count}</small>
       </label>
@@ -136,8 +173,9 @@ function layerRow(layer, locked) {
 
 function bindLayerActions() {
   document.querySelectorAll("#layers-list [data-act], #folders-list [data-act], #user-layers-list [data-act]").forEach((el) => {
-    el.addEventListener("change", onLayerAction);
-    el.addEventListener("click", onLayerAction);
+    // A checkbox fires both click and change: listening to both sent two PATCH requests
+    // and started two overlapping map reloads (duplicated shapes).
+    el.addEventListener(el.type === "checkbox" ? "change" : "click", onLayerAction);
   });
 }
 
@@ -153,7 +191,7 @@ async function onLayerAction(event) {
       const layer = layers.find((l) => l.id === id);
       const ok = await confirmModal({
         title: "Удалить слой",
-        bodyHtml: `<p>Удалить слой «${layer?.name || ""}» со всеми объектами?</p>`,
+        bodyHtml: `<p>Удалить слой «${escapeHtml(layer?.name || "")}» со всеми объектами?</p>`,
         confirmLabel: "Удалить",
         danger: true,
       });
@@ -164,7 +202,7 @@ async function onLayerAction(event) {
       const folder = folders.find((f) => f.id === id);
       const ok = await confirmModal({
         title: "Удалить папку",
-        bodyHtml: `<p>Удалить папку «${folder?.name || ""}»? Слои и объекты останутся на карте.</p>`,
+        bodyHtml: `<p>Удалить папку «${escapeHtml(folder?.name || "")}»? Слои и объекты останутся на карте.</p>`,
         confirmLabel: "Удалить",
         danger: true,
       });
@@ -192,7 +230,7 @@ export function filterLayers(value) {
 
 function folderOptions(selectedId) {
   return `<option value="">Без папки</option>${folders
-    .map((f) => `<option value="${f.id}" ${f.id === selectedId ? "selected" : ""}>${f.name}</option>`)
+    .map((f) => `<option value="${f.id}" ${f.id === selectedId ? "selected" : ""}>${escapeHtml(f.name)}</option>`)
     .join("")}`;
 }
 
@@ -200,8 +238,8 @@ function openLayerModal(existing) {
   openAppModal({
     title: existing ? "Слой" : "Новый слой",
     bodyHtml: `
-      <div class="input-group"><label>НАЗВАНИЕ</label><input id="modal-layer-name" class="search-input" value="${existing?.name || ""}"></div>
-      <div class="input-group"><label>ЦВЕТ</label><input id="modal-layer-color" type="color" class="color-input" value="${existing?.color || "#3388ff"}"></div>
+      <div class="input-group"><label>НАЗВАНИЕ</label><input id="modal-layer-name" class="search-input" value="${escapeHtml(existing?.name || "")}"></div>
+      <div class="input-group"><label>ЦВЕТ</label><input id="modal-layer-color" type="color" class="color-input" value="${escapeHtml(existing?.color || "#3388ff")}"></div>
       <div class="input-group"><label>ПАПКА</label><select id="modal-layer-folder" class="search-input">${folderOptions(existing?.folder_id)}</select></div>
     `,
     actions: [
@@ -234,7 +272,7 @@ function openLayerModal(existing) {
 function openFolderModal(existing) {
   openAppModal({
     title: existing ? "Папка" : "Новая папка",
-    bodyHtml: `<div class="input-group"><label>НАЗВАНИЕ</label><input id="modal-folder-name" class="search-input" value="${existing?.name || ""}"></div>`,
+    bodyHtml: `<div class="input-group"><label>НАЗВАНИЕ</label><input id="modal-folder-name" class="search-input" value="${escapeHtml(existing?.name || "")}"></div>`,
     actions: [
       { label: "Отмена", onClick: closeAppModal },
       {
@@ -268,11 +306,15 @@ export async function createFolder() {
 export function populateDrawLayerSelect() {
   const select = $("draw-layer-select");
   if (!select) return;
-  select.innerHTML = layers.map((l) => `<option value="${l.id}">${l.name}</option>`).join("");
+  const previous = select.value;
+  // Own layers first: a new drawing defaults to a user layer, not a recognition category.
+  const ordered = [...layers.filter((l) => !isAuto(l)), ...layers.filter(isAuto)];
+  select.innerHTML = ordered.map((l) => `<option value="${l.id}">${escapeHtml(l.name)}</option>`).join("");
+  if (previous && ordered.some((l) => l.id === previous)) select.value = previous;
 }
 
 export function currentDrawLayerId() {
-  return $("draw-layer-select")?.value || layers.find((l) => l.kind === "user")?.id || layers[0]?.id;
+  return $("draw-layer-select")?.value || layers.find((l) => !isAuto(l))?.id || layers[0]?.id;
 }
 
 export async function persistDrawnLayer(leafletLayer, origin = "manual") {
@@ -366,7 +408,10 @@ function renderLegend() {
   if (!el) return;
   el.innerHTML = layers
     .filter((l) => l.is_visible !== false && layerCountLabel(l) > 0)
-    .map((l) => `<span class="legend-item" title="${l.name}"><i style="background:${l.color}"></i>${l.name}</span>`)
+    .map(
+      (l) =>
+        `<span class="legend-item" title="${escapeHtml(l.name)}"><i style="background:${escapeHtml(l.color)}"></i>${escapeHtml(l.name)}</span>`,
+    )
     .join("");
 }
 
@@ -402,7 +447,7 @@ export function populateCropSelect() {
   if (!select) return;
   const all = [...CROP_DEFAULTS, ...customCrops()];
   select.innerHTML = `<option value="">—</option>${all
-    .map((c) => `<option value="${c}">${c}</option>`)
+    .map((c) => `<option value="${escapeHtml(c)}">${escapeHtml(c)}</option>`)
     .join("")}<option value="__custom__">⚙ Свои культуры…</option>`;
 }
 
@@ -422,7 +467,7 @@ function openCropsModal() {
     title: "Свои культуры",
     bodyHtml: `
       <div class="input-group"><input id="modal-crop-name" class="search-input" placeholder="Новая культура"></div>
-      <div id="modal-crop-list">${list.map((c) => `<div class="layer-item">${c} <button type="button" class="mini-btn" data-crop="${c}">✕</button></div>`).join("")}</div>
+      <div id="modal-crop-list">${list.map((c) => `<div class="layer-item">${escapeHtml(c)} <button type="button" class="mini-btn" data-crop="${escapeHtml(c)}">✕</button></div>`).join("")}</div>
     `,
     actions: [
       { label: "Закрыть", onClick: closeAppModal },

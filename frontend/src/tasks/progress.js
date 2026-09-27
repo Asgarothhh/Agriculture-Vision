@@ -31,6 +31,25 @@ export function taskStage(task) {
   return { percent: TASK_TO, text: "Обработка на сервере завершена" };
 }
 
+/**
+ * Header pill for the ML server (spec 4): «ML <models>» when ready, «ML недоступен»
+ * when the server does not answer, «ML оффлайн» when the user has no internet.
+ */
+export function mlPillState(health, { online = true, failed = false } = {}) {
+  if (!online) return { text: "ML оффлайн", cls: "status-offline" };
+  if (failed || !health) return { text: "ML недоступен", cls: "status-idle" };
+  if (health.status === "loading") return { text: "ML · загрузка моделей", cls: "status-idle" };
+  if (health.status !== "ready") return { text: "ML недоступен", cls: "status-idle" };
+  const loaded = (health.models || []).filter((m) => m.loaded).map((m) => m.code);
+  return { text: `ML · ${loaded.join(", ") || "готов"}`, cls: "status-online" };
+}
+
+export function mlPillTitle(health) {
+  const models = health?.models || [];
+  const lines = models.map((m) => `${m.code}: ${m.loaded ? "загружена" : m.error || "не загружена"}`);
+  return lines.join("\n") || "Нет данных от ML-сервера";
+}
+
 export function humanizeSegError(err) {
   if (isSecurityError(err)) {
     return "Браузер запретил чтение изображения карты (SecurityError). Обновите страницу с очисткой кэша (Ctrl+F5); если ошибка повторится — смените подложку.";

@@ -167,3 +167,128 @@ def test_api_health_worker_not_reported(ml_health_key):
     assert health["status"] == "unavailable"
     assert {m["code"] for m in health["models"]} == {"yolo_seg_26", "segformer"}
     assert all(m["error"] == "ML worker has not reported model status" for m in health["models"])
+
+
+def test_run_segmentation_is_called_with_its_real_signature(monkeypatch):
+    import ast
+    import sys
+    import types
+
+    import importlib.util
+
+    import numpy as np
+
+    # app/segmentation_service/__init__ imports torch; load the pydantic schemas file alone.
+    spec = importlib.util.spec_from_file_location(
+        "segmentation_service.schemas", ROOT / "app" / "segmentation_service" / "schemas.py"
+    )
+    schemas = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(schemas)
+    PolygonItem, PolygonPayload = schemas.PolygonItem, schemas.PolygonPayload
+    SegmentMetrics, SegmentResponse = schemas.SegmentMetrics, schemas.SegmentResponse
+
+    # The real pipeline needs torch and top-level ml_core imports; read its signature from source.
+    source = (ROOT / "app" / "segmentation_service" / "pipeline.py").read_text(encoding="utf-8")
+    func = next(
+        node for node in ast.walk(ast.parse(source))
+        if isinstance(node, ast.FunctionDef) and node.name == "run_segmentation"
+    )
+    assert [a.arg for a in func.args.args] == ["runtime"]
+    assert {"rgb", "request"} <= {a.arg for a in func.args.kwonlyargs}
+
+    seen = {}
+
+    def fake_run_segmentation(rt, *, rgb_path=None, nir_path=None, rgb=None, nir=None, request=None):
+        seen["shape"] = rgb.shape
+        seen["threshold"] = request.threshold
+        return SegmentResponse(
+            navigable=PolygonPayload(polygon_px=[], area_px=0.0, valid=False),
+            polygons=[PolygonItem(polygon_px=[(10, 10), (50, 10), (50, 40), (10, 40)], area_px=1200.0)],
+            image_hw=(100, 200),
+            checkpoint="x",
+            metrics=SegmentMetrics(
+                threshold_used=0.4, area_frac=0.1, prob_mean=0.5, prob_std=0.1,
+                mode="prob_only", inference_ms=1.0, fp16=False, device="cpu",
+            ),
+        )
+
+    fake_pipeline = types.ModuleType("segmentation_service.pipeline")
+    fake_pipeline.run_segmentation = fake_run_segmentation
+    monkeypatch.setitem(sys.modules, "segmentation_service", types.ModuleType("segmentation_service"))
+    monkeypatch.setitem(sys.modules, "segmentation_service.pipeline", fake_pipeline)
+    monkeypatch.setitem(sys.modules, "segmentation_service.schemas", schemas)
+
+    engine = ModelRuntime()
+    engine._segformer = object()
+    image = np.zeros((200, 400, 3), dtype=np.uint8)  # pipeline reported 100x200 -> scale x2
+    payload = engine._run_segformer(image, 0.4)
+    assert seen == {"shape": (200, 400, 3), "threshold": 0.4}
+    assert len(payload["polygons"]) == 1
+    poly = payload["polygons"][0]
+    assert poly["class_id"] == 2
+    ring = poly["geometry"]["coordinates"][0]
+    assert ring[0] == ring[-1]
+    assert ring[1] == [100.0, 20.0]
+
+
+def test_yolo_classes_map_to_spec_categories():
+    import numpy as np
+
+    from app.ml_service.runtime import POINT_CLASS_IDS, yolo_class_id
+
+    names = {0: "double_plant", 1: "drydown", 2: "endrow", 3: "nutrient_deficiency", 4: "planter_skip",
+             5: "storm_damage", 6: "water", 7: "waterway", 8: "weed_cluster"}
+    assert [yolo_class_id(names, i) for i in range(9)] == [21, 22, 23, 27, 26, 28, 4, 24, 25]
+    assert yolo_class_id(names, 42) is None
+    assert yolo_class_id(["water", "unknown_thing"], 1) is None
+    assert 26 in POINT_CLASS_IDS
+
+    class Boxes:
+        cls = np.array([6, 4, 3])
+        conf = np.array([0.9, 0.8, 0.7])
+
+    square = np.array([[0, 0], [10, 0], [10, 10], [0, 10]], dtype=float)
+
+    class Masks:
+        xy = [square, square + 20, square + 40]
+
+    class Result:
+        boxes = Boxes()
+        masks = Masks()
+
+    class FakeYolo:
+        def __init__(self):
+            self.names = names
+
+        def predict(self, image, conf, verbose):
+            self.image = image
+            return [Result()]
+
+    engine = ModelRuntime()
+    engine._yolo = FakeYolo()
+    rgb = np.zeros((32, 32, 3), dtype=np.uint8)
+    rgb[..., 0] = 255  # pure red in RGB
+    payload = engine._run_yolo(rgb, 0.25)
+    assert engine._yolo.image[0, 0].tolist() == [0, 0, 255]  # handed to YOLO as BGR
+    assert [p["class_id"] for p in payload["polygons"]] == [4, 27]
+    assert [p["class_id"] for p in payload["points"]] == [26]
+    assert payload["points"][0]["geometry"]["coordinates"] == [25.0, 25.0]
+
+
+def test_api_health_reports_models_loading(ml_health_key, monkeypatch):
+    from app.core.celery_app import celery_app
+
+    runtime.reset()
+    monkeypatch.setattr(celery_app.control, "ping", lambda **_kw: [{"worker@pod": {"ok": "pong"}}])
+    ml_health_key.publish_health({"status": "loading", "models": []})
+    health = ml_health_key.get_ml_health()
+    assert health["status"] == "loading"
+    assert {m["code"] for m in health["models"]} == {"yolo_seg_26", "segformer"}
+    assert all(not m["loaded"] for m in health["models"])
+
+
+def test_celery_does_not_kill_worker_while_models_load():
+    from app.core.celery_app import celery_app
+
+    # Celery's default is 4 s; loading torch + YOLO + SegFormer takes much longer.
+    assert celery_app.conf.worker_proc_alive_timeout >= 60

@@ -1,4 +1,4 @@
-import { showToast, openAppModal, closeAppModal, $ } from "../ui.js";
+import { escapeHtml, showToast, openAppModal, closeAppModal, $ } from "../ui.js";
 import * as layersApi from "../api/layers.js";
 import {
   loadMapData,
@@ -36,7 +36,6 @@ let brushPts = [];
 let drawing = false;
 let handlers = [];
 let selected = [];
-let lastHover = null;
 let annotations = [];
 let editMode = "brush";
 let paintIntent = "create";
@@ -148,7 +147,9 @@ export function setSelection(ids, { additive = false } = {}) {
     $("field-detail-panel").style.display = "block";
     $("field-name-input").value = one.obj.name || "";
     $("field-name-input").dataset.objectId = one.obj.id;
-    $("field-area-value").textContent = formatArea(geodesicAreaM2(one.obj.geom));
+    const isPoint = /Point$/.test(one.obj.geom?.type || "");
+    // geodesicAreaM2 walks polygon rings; a point has none (it used to throw here).
+    $("field-area-value").textContent = isPoint ? "точечный объект" : formatArea(geodesicAreaM2(one.obj.geom));
   } else if (!selected.length) {
     $("field-detail-panel").style.display = "none";
   }
@@ -323,7 +324,7 @@ function onTextClick(e) {
           closeAppModal();
           if (!text) return;
           const marker = L.marker(e.latlng, {
-            icon: L.divIcon({ className: "map-text-label", html: text, iconSize: [0, 0] }),
+            icon: L.divIcon({ className: "map-text-label", html: escapeHtml(text), iconSize: [0, 0] }),
           }).addTo(map());
           annotations.push({ type: "text", layer: marker });
         },
@@ -721,10 +722,6 @@ export function setEditDrawMode(mode) {
   setTool(mode === "eraser" ? "eraser" : mode === "polygon" ? "polygon" : "brush");
 }
 
-function hoverAt(e) {
-  lastHover = e.layer?.avObject || e.target?.avObject || null;
-}
-
 export async function deleteAtPriority() {
   const hoverAnn = annotations.find((item) => item.layer?._map && item.layer.getBounds?.()?.contains?.(map().getCenter()));
   const under = annotations.find((item) => {
@@ -734,21 +731,35 @@ export async function deleteAtPriority() {
       return false;
     }
   });
-  if (lastHover?.id) {
-    const rec = getObjectRecord(lastHover.id);
-    await layersApi.deleteObject(lastHover.id);
-    await loadMapData();
-    pushUndo({
-      undo: async () => rec && persistDrawnLayer(L.geoJSON(rec.obj.geom).getLayers()[0]),
-      redo: async () => layersApi.deleteObject(lastHover.id).then(loadMapData),
-    });
-    return;
-  }
+  // Spec 6.2 / test 43: Delete removes the selected objects; only when nothing is selected
+  // does it fall back to the map annotations. (Deleting whatever the mouse last passed
+  // over removed objects the user never selected.)
   if (selected.length) {
-    const ids = selected.slice();
-    await Promise.all(ids.map((id) => layersApi.deleteObject(id)));
-    await loadMapData();
+    const recs = selected.map((id) => getObjectRecord(id)).filter(Boolean);
+    await Promise.all(recs.map((rec) => layersApi.deleteObject(rec.obj.id)));
     setSelection([]);
+    await loadMapData();
+    let restored = [];
+    pushUndo({
+      // Restore into the original layer with the original name, not into the draw layer.
+      undo: async () => {
+        restored = await Promise.all(
+          recs.map((rec) =>
+            layersApi.addObject(rec.layer.id, {
+              name: rec.obj.name || "",
+              geom: rec.obj.geom,
+              origin: rec.obj.origin || "manual",
+            }),
+          ),
+        );
+        await loadMapData();
+      },
+      redo: async () => {
+        await Promise.all(restored.map((obj) => layersApi.deleteObject(obj.id)));
+        await loadMapData();
+      },
+    });
+    showToast(recs.length === 1 ? "Объект удалён" : `Удалено объектов: ${recs.length}`);
     return;
   }
   const last = annotations.pop();
@@ -802,7 +813,6 @@ export function setTool(name) {
   if (active === "select") {
     on("click", onSelectClick, getFeatureGroup());
     on("click", onMapBlankClick);
-    on("mouseover", hoverAt, getFeatureGroup());
   } else if (active === "ruler") {
     on("click", onRulerClick);
     on("mousemove", onRulerMove);

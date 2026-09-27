@@ -23,6 +23,14 @@ describe("formatDetail", () => {
   it("joins validation array", () => {
     expect(formatDetail({ detail: [{ msg: "a" }, { msg: "b" }] })).toBe("a; b");
   });
+
+  it("drops the pydantic «Value error,» prefix", () => {
+    expect(formatDetail({ detail: [{ msg: "Value error, Пароли не совпадают" }] })).toBe("Пароли не совпадают");
+  });
+
+  it("explains slowapi rate limit answers", () => {
+    expect(formatDetail({ error: "Rate limit exceeded: 5 per 1 minute" })).toMatch(/подождите/);
+  });
 });
 
 describe("tokens", () => {

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { SEG_STAGES, humanizeSegError, taskStage } from "./progress.js";
+import { SEG_STAGES, humanizeSegError, mlPillState, mlPillTitle, taskStage } from "./progress.js";
 import { withTimeout } from "../ui.js";
 
 describe("taskStage", () => {
@@ -54,5 +54,27 @@ describe("withTimeout", () => {
 
   it("resolves when the promise settles in time", async () => {
     await expect(withTimeout(Promise.resolve(42), 1000, "timeout!")).resolves.toBe(42);
+  });
+});
+
+describe("mlPillState", () => {
+  const ready = {
+    status: "ready",
+    models: [
+      { code: "segformer", loaded: true },
+      { code: "yolo_seg_26", loaded: false, error: "weights file not found" },
+    ],
+  };
+
+  it("shows loaded models, loading, unavailable and offline states", () => {
+    expect(mlPillState(ready)).toEqual({ text: "ML · segformer", cls: "status-online" });
+    expect(mlPillState({ status: "loading", models: [] }).text).toBe("ML · загрузка моделей");
+    expect(mlPillState({ status: "unavailable", models: [] }).text).toBe("ML недоступен");
+    expect(mlPillState(null, { failed: true }).text).toBe("ML недоступен");
+    expect(mlPillState(ready, { online: false }).text).toBe("ML оффлайн");
+  });
+
+  it("puts the reason of each model into the tooltip", () => {
+    expect(mlPillTitle(ready)).toBe("segformer: загружена\nyolo_seg_26: weights file not found");
   });
 });

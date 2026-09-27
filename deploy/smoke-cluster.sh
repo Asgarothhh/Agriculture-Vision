@@ -5,13 +5,14 @@
 # (kube-proxy has not programmed endpoints yet) or stay closed on the host
 # while the Service is healthy inside the cluster. Retry the host, then ask
 # the pods directly.
-# Finally check that the Celery worker has loaded the SegFormer weights and
+# Then check that the API and the worker share object storage, and that the
+# Celery worker has loaded the SegFormer weights and
 # the API sees them (models are loaded only in the worker, see
 # app/ml_service/health_store.py) — otherwise segmentation is dead in the UI.
 set -eu
 
 NS="${KUBE_NAMESPACE:-ml-service}"
-ML_WAIT_ATTEMPTS="${ML_WAIT_ATTEMPTS:-36}"
+ML_WAIT_ATTEMPTS="${ML_WAIT_ATTEMPTS:-60}"
 IP="$(minikube ip)"
 echo "minikube ip: ${IP}"
 
@@ -48,6 +49,17 @@ except urllib.error.HTTPError as exc:
 ")"
   echo "login ${code}"
   test "$code" != "502" -a "$code" != "000"
+}
+
+storage_smoke() {
+  # The API stores the upload, the worker reads it: both must see the same object storage.
+  key="smoke/$(date +%s)-$$.txt"
+  echo "STORAGE: api uploads ${key}, worker downloads it"
+  kubectl exec -n "$NS" deploy/agriculture-vision-api -c fastapi-api -- \
+    python -c "from app.core.storage import upload_bytes; upload_bytes('${key}', b'smoke', 'text/plain')"
+  kubectl exec -n "$NS" deploy/agriculture-vision-worker -- \
+    python -c "from app.core.storage import delete_object, download_bytes; assert download_bytes('${key}') == b'smoke'; delete_object('${key}')"
+  echo "STORAGE: ok"
 }
 
 ml_smoke() {
@@ -98,4 +110,5 @@ else
   in_cluster_smoke
 fi
 
+storage_smoke
 ml_smoke

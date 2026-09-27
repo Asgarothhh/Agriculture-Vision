@@ -1,4 +1,4 @@
-import { api, apiForm } from "./client.js";
+import { api, apiForm, apiWithHeaders } from "./client.js";
 
 export function listLayers(search) {
   const q = search ? `?search=${encodeURIComponent(search)}` : "";
@@ -78,9 +78,10 @@ export function importLayer(file) {
   return apiForm("/api/v1/layers/import", form);
 }
 
+/** Resolves to { payload, headers }; X-Exported-Count holds the number of objects. */
 export function exportLayers(format, layerIds) {
   const mapped = format === "shp" ? "shapefile" : format;
-  return api("/api/v1/layers/export", {
+  return apiWithHeaders("/api/v1/layers/export", {
     method: "POST",
     body: JSON.stringify({ format: mapped, layer_ids: layerIds || null }),
   });

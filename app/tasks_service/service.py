@@ -246,7 +246,9 @@ async def publish_to_layers(
 ) -> dict[str, Any]:
     if task.status != "COMPLETED" or task.image is None:
         raise HTTPException(status.HTTP_409_CONFLICT, detail="Нет завершённого результата")
-    layers_stmt = select(Layer).where(Layer.user_id == user.id, Layer.kind == "auto", Layer.is_visible.is_(True))
+    # Layer visibility is a display toggle; which classes to publish is decided by class_ids
+    # (the category checkboxes in the settings panel).
+    layers_stmt = select(Layer).where(Layer.user_id == user.id, Layer.kind == "auto")
     layers = (await db.execute(layers_stmt)).scalars().all()
     by_class = {layer.class_id: layer for layer in layers if layer.class_id is not None}
     allowed = set(class_ids) if class_ids else set(by_class)

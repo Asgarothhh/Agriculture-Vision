@@ -1,6 +1,22 @@
 import { clearTokens, getAccessToken } from "../api/client.js";
 import * as authApi from "../api/auth.js";
-import { $, closeAppModal, confirmModal, initials, openAppModal, setFormError, showForm, showScreen, showToast } from "../ui.js";
+import {
+  $,
+  PASSWORD_RULE_TEXT,
+  closeAppModal,
+  confirmModal,
+  initials,
+  openAppModal,
+  setFormError,
+  showForm,
+  showScreen,
+  showToast,
+  validatePassword,
+} from "../ui.js";
+
+const RESET_CODE_DIGITS = 6;
+const RESEND_COOLDOWN_S = 60;
+let resendAvailableAt = 0;
 import { resetDisplaySettings } from "../layers/store.js";
 
 let currentUser = null;
@@ -73,17 +89,17 @@ export async function handleLogin(event) {
   return false;
 }
 
-function validatePassword(value) {
-  return /^(?=.*[a-zа-я])(?=.*[A-ZА-Я])(?=.*[^A-Za-zА-Яа-я0-9]).{8,}$/.test(value);
-}
-
 export async function handleRegister(event) {
   event.preventDefault();
   setFormError("register-error", "");
   const password = $("reg-password").value;
   const passwordRepeat = $("reg-password2").value;
   if (!validatePassword(password)) {
-    setFormError("register-error", "Пароль: минимум 8 символов, строчная и заглавная буквы, спецсимвол");
+    setFormError("register-error", PASSWORD_RULE_TEXT);
+    return false;
+  }
+  if (password !== passwordRepeat) {
+    setFormError("register-error", "Пароли не совпадают");
     return false;
   }
   try {
@@ -102,6 +118,15 @@ export async function handleRegister(event) {
     showScreen("app");
     await onReady(me);
   } catch (err) {
+    if (err.status === 409) {
+      // Spec 2.1: an already registered email switches the user to the login form.
+      const email = $("reg-email").value.trim();
+      showForm("login");
+      if ($("login-email")) $("login-email").value = email;
+      setFormError("login-error", "Этот email уже зарегистрирован — войдите с его паролем или восстановите пароль");
+      $("login-password")?.focus();
+      return false;
+    }
     setFormError("register-error", err.message || "Не удалось создать аккаунт.");
   }
   return false;
@@ -149,6 +174,20 @@ function escapeAttr(value) {
     .replace(/</g, "&lt;");
 }
 
+/** Spec 2.1: a new code can be requested at most once a minute — show the countdown. */
+function startResendCountdown() {
+  const btn = $("reset-resend");
+  if (!btn) return;
+  const tick = () => {
+    if (!btn.isConnected) return;
+    const left = Math.ceil((resendAvailableAt - Date.now()) / 1000);
+    btn.disabled = left > 0;
+    btn.textContent = left > 0 ? `Отправить код ещё раз (${left} с)` : "Отправить код ещё раз";
+    if (left > 0) setTimeout(tick, 1000);
+  };
+  tick();
+}
+
 function applyResetCodeHint(res, email) {
   const mailSent = !!res?.mail_sent;
   const devCode = res?.dev_code ? String(res.dev_code) : "";
@@ -163,7 +202,7 @@ function renderResetStep({ email, step, code, mailSent, devCode }) {
     openAppModal({
       title: "Восстановление пароля",
       bodyHtml: `<div class="input-group"><label>EMAIL</label><input id="reset-email" type="email" class="search-input" value="${escapeAttr(email)}"></div>
-        <p class="modal-hint">Код из 4 цифр. Письмо уходит только если на сервере задан SMTP. Иначе код покажем в следующем окне.</p>
+        <p class="modal-hint">Код из ${RESET_CODE_DIGITS} цифр действует 15 минут. Письмо уходит только если на сервере задан SMTP. Иначе код покажем в следующем окне.</p>
         <p class="modal-error" id="reset-modal-error"></p>`,
       actions: [
         { label: "Отмена", onClick: closeAppModal },
@@ -181,6 +220,7 @@ function renderResetStep({ email, step, code, mailSent, devCode }) {
             if (btn) btn.disabled = true;
             try {
               const res = await authApi.requestPasswordReset(value);
+              resendAvailableAt = Date.now() + RESEND_COOLDOWN_S * 1000;
               applyResetCodeHint(res, value);
             } catch (err) {
               const message = err.message || "Не удалось отправить код";
@@ -198,15 +238,15 @@ function renderResetStep({ email, step, code, mailSent, devCode }) {
   if (step === 2) {
     const codeBlock = devCode
       ? `<p class="reset-dev-code" id="reset-code-display">${escapeAttr(devCode)}</p>
-         <p class="modal-hint" id="reset-dev-hint">Письмо не отправлено: SMTP на сервере пустой. Введите эти 4 цифры.</p>`
+         <p class="modal-hint" id="reset-dev-hint">Письмо не отправлено: SMTP на сервере пустой. Введите эти ${RESET_CODE_DIGITS} цифр.</p>`
       : `<p class="modal-hint" id="reset-dev-hint">${
           mailSent
-            ? "Проверьте почту, в том числе «Спам». Код из 4 цифр действует 15 минут."
+            ? `Проверьте почту, в том числе «Спам». Код из ${RESET_CODE_DIGITS} цифр действует 15 минут.`
             : "Если аккаунт с этим email есть, код отправлен. Без SMTP письмо не уйдёт."
         }</p>`;
     openAppModal({
       title: "Код из письма",
-      bodyHtml: `<div class="input-group"><label>КОД</label><input id="reset-code" class="search-input" maxlength="4" inputmode="numeric" value="${escapeAttr(devCode)}"></div>
+      bodyHtml: `<div class="input-group"><label>КОД</label><input id="reset-code" class="search-input" maxlength="${RESET_CODE_DIGITS}" inputmode="numeric" autocomplete="one-time-code" value="${escapeAttr(devCode)}"></div>
         <button type="button" class="mini-btn" id="reset-resend">Отправить код ещё раз</button>
         ${codeBlock}
         <p class="modal-error" id="reset-modal-error"></p>`,
@@ -217,9 +257,9 @@ function renderResetStep({ email, step, code, mailSent, devCode }) {
           className: "mini-btn mini-btn-red",
           onClick: () => {
             const nextCode = $("reset-code").value.trim();
-            if (!/^\d{4}$/.test(nextCode)) {
-              setResetModalError("Введите 4 цифры");
-              showToast("Введите 4 цифры", true);
+            if (!new RegExp(`^[0-9]{${RESET_CODE_DIGITS}}$`).test(nextCode)) {
+              setResetModalError(`Введите ${RESET_CODE_DIGITS} цифр`);
+              showToast(`Введите ${RESET_CODE_DIGITS} цифр`, true);
               return;
             }
             renderResetStep({ email, step: 3, code: nextCode });
@@ -227,9 +267,12 @@ function renderResetStep({ email, step, code, mailSent, devCode }) {
         },
       ],
     });
+    startResendCountdown();
     $("reset-resend")?.addEventListener("click", async () => {
+      if (Date.now() < resendAvailableAt) return;
       try {
         const res = await authApi.requestPasswordReset(email);
+        resendAvailableAt = Date.now() + RESEND_COOLDOWN_S * 1000;
         applyResetCodeHint(res, email);
       } catch (err) {
         setResetModalError(err.message);
@@ -250,6 +293,15 @@ function renderResetStep({ email, step, code, mailSent, devCode }) {
         label: "Сменить пароль",
         className: "mini-btn mini-btn-red",
         onClick: async () => {
+          const newPassword = $("reset-password").value;
+          if (!validatePassword(newPassword)) {
+            setResetModalError(PASSWORD_RULE_TEXT);
+            return;
+          }
+          if (newPassword !== $("reset-password2").value) {
+            setResetModalError("Пароли не совпадают");
+            return;
+          }
           try {
             await authApi.confirmPasswordReset({
               email,

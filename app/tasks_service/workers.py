@@ -25,8 +25,19 @@ app = celery_app
 logger = logging.getLogger(__name__)
 
 
+def _publish(payload: dict) -> None:
+    try:
+        publish_health(payload)
+        logger.info("ML health published: %s", payload.get("status"))
+    except Exception:
+        logger.exception("ML health publish failed")
+
+
 @worker_process_init.connect
 def _load_weights(**kwargs) -> None:
+    # Loading takes far longer than Celery's default 4 s UP timeout; celery_app raises
+    # worker_proc_alive_timeout so the pool does not SIGKILL this child mid-load.
+    _publish({"status": "loading", "models": []})
     payload = load_models()
     for item in payload.get("models", []):
         logger.info(
@@ -36,11 +47,7 @@ def _load_weights(**kwargs) -> None:
             item.get("weights"),
             item.get("error"),
         )
-    try:
-        publish_health(payload)
-        logger.info("ML health published: %s", payload.get("status"))
-    except Exception:
-        logger.exception("ML health publish failed")
+    _publish(payload)
 
 
 @worker_shutdown.connect
@@ -111,7 +118,7 @@ def run_inference(task_id: str, transform: list[float] | None = None, pixel_spac
                 user_id=task.user_id,
                 category="upload_processing",
                 action="Обработка снимка завершена",
-                payload={"task_id": str(task.id), "model": task.model_name},
+                payload={"task_id": str(task.id), "model": task.model_name, "status": "COMPLETED"},
             )
         )
         session.commit()
@@ -127,7 +134,7 @@ def run_inference(task_id: str, transform: list[float] | None = None, pixel_spac
                     user_id=task.user_id,
                     category="upload_processing",
                     action="Ошибка обработки снимка",
-                    payload={"task_id": str(task.id), "error": str(exc)[:500]},
+                    payload={"task_id": str(task.id), "status": "FAILED", "error": str(exc)[:500]},
                 )
             )
             session.commit()

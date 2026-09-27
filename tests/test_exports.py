@@ -9,29 +9,39 @@ def test_activity_search_parses_dotted_and_compact_dates():
     assert any(item == (7, 7, 2026) for item in dates)
 
 
-def test_shapefile_zip_contains_shp():
+def test_shapefile_zip_splits_mixed_geometry():
+    import io
+    import zipfile
+
+    import pytest
+
+    pytest.importorskip("geopandas")
+    feature = lambda geom, name: {  # noqa: E731
+        "type": "Feature",
+        "geometry": geom,
+        "properties": {"name": name, "layer_name": "Слой", "layer_color": "#6D4C41", "origin": "manual", "number": 1},
+    }
     geojson = {
         "type": "FeatureCollection",
         "features": [
-            {
-                "type": "Feature",
-                "geometry": {"type": "Point", "coordinates": [27.5, 53.9]},
-                "properties": {
-                    "name": "Дерево",
-                    "layer_name": "Дерево",
-                    "layer_color": "#6D4C41",
-                    "origin": "manual",
-                    "is_point": True,
-                    "number": 1,
-                },
-            }
+            feature({"type": "Point", "coordinates": [27.5, 53.9]}, "Дерево"),
+            feature(
+                {"type": "Polygon", "coordinates": [[[27.4, 53.8], [27.5, 53.8], [27.5, 53.9], [27.4, 53.8]]]},
+                "Поле",
+            ),
         ],
     }
-    try:
-        payload = geojson_to_shapefile_zip(geojson)
-    except Exception:
-        payload = b"PK"
-    assert payload[:2] == b"PK" or payload.startswith(b"PK")
+    payload = geojson_to_shapefile_zip(geojson)
+    names = set(zipfile.ZipFile(io.BytesIO(payload)).namelist())
+    assert {"layers_points.shp", "layers_polygons.shp", "layers_points.dbf", "layers_polygons.dbf"} <= names
+
+
+def test_shapefile_zip_rejects_empty_collection():
+    import pytest
+
+    pytest.importorskip("geopandas")
+    with pytest.raises(ValueError):
+        geojson_to_shapefile_zip({"type": "FeatureCollection", "features": []})
 
 
 def test_merge_conflict_rule():

@@ -52,9 +52,18 @@ OBJECT_CLASSES: list[dict] = [
     {"id": 1, "name": "Следы почвообработки", "geometry_type": "POLYGON", "is_crop": False},
     {"id": 2, "name": "Культурные растения", "geometry_type": "POLYGON", "is_crop": False},
     {"id": 3, "name": "Кустарник", "geometry_type": "POLYGON", "is_crop": False},
-    {"id": 4, "name": "Водоём", "geometry_type": "POLYGON", "is_crop": False},
+    {"id": 4, "name": "Водоём / затопление", "geometry_type": "POLYGON", "is_crop": False},
     {"id": 5, "name": "Дерево", "geometry_type": "POINT", "is_crop": False},
     {"id": 6, "name": "Столб", "geometry_type": "POINT", "is_crop": False},
+    # Categories of the YOLO model (config/data.yaml), as listed in the spec settings.
+    {"id": 21, "name": "Двойной посев", "geometry_type": "POLYGON", "is_crop": False},
+    {"id": 22, "name": "Усыхание посева", "geometry_type": "POLYGON", "is_crop": False},
+    {"id": 23, "name": "Краевая полоса", "geometry_type": "POLYGON", "is_crop": False},
+    {"id": 24, "name": "Водоток", "geometry_type": "POLYGON", "is_crop": False},
+    {"id": 25, "name": "Скопление сорняков", "geometry_type": "POLYGON", "is_crop": False},
+    {"id": 26, "name": "Пропуск сеялки", "geometry_type": "POINT", "is_crop": False},
+    {"id": 27, "name": "Дефицит питания", "geometry_type": "POLYGON", "is_crop": False},
+    {"id": 28, "name": "Повреждение градом/бурей", "geometry_type": "POLYGON", "is_crop": False},
     {"id": 10, "name": "Пшеница", "geometry_type": "POLYGON", "is_crop": True},
     {"id": 11, "name": "Кукуруза", "geometry_type": "POLYGON", "is_crop": True},
     {"id": 12, "name": "Соя", "geometry_type": "POLYGON", "is_crop": True},
@@ -72,10 +81,20 @@ SYSTEM_LAYERS = [
     {"name": "Следы почвообработки", "color": "#8D6E63", "class_id": 1},
     {"name": "Культурные растения", "color": "#43A047", "class_id": 2},
     {"name": "Кустарник", "color": "#2E7D32", "class_id": 3},
-    {"name": "Водоём", "color": "#1E88E5", "class_id": 4},
+    {"name": "Водоём / затопление", "color": "#1E88E5", "class_id": 4},
     {"name": "Дерево", "color": "#6D4C41", "class_id": 5},
     {"name": "Столб", "color": "#546E7A", "class_id": 6},
+    {"name": "Двойной посев", "color": "#7CB342", "class_id": 21},
+    {"name": "Усыхание посева", "color": "#F9A825", "class_id": 22},
+    {"name": "Краевая полоса", "color": "#8E24AA", "class_id": 23},
+    {"name": "Водоток", "color": "#00ACC1", "class_id": 24},
+    {"name": "Скопление сорняков", "color": "#C62828", "class_id": 25},
+    {"name": "Пропуск сеялки", "color": "#FF7043", "class_id": 26},
+    {"name": "Дефицит питания", "color": "#FDD835", "class_id": 27},
+    {"name": "Повреждение градом/бурей", "color": "#5E35B1", "class_id": 28},
 ]
+# Auto layers created before a class was renamed keep their old default name otherwise.
+RENAMED_SYSTEM_LAYERS = {4: "Водоём"}
 
 
 def _utcnow() -> datetime:
@@ -83,14 +102,14 @@ def _utcnow() -> datetime:
 
 
 def ensure_system_layers(session: Session, user: User) -> None:
-    existing = {
-        row.class_id
-        for row in session.scalars(
-            select(Layer).where(Layer.user_id == user.id, Layer.kind == "auto")
-        )
-    }
+    existing = {}
+    for row in session.scalars(select(Layer).where(Layer.user_id == user.id, Layer.kind == "auto")):
+        existing[row.class_id] = row
     for item in SYSTEM_LAYERS:
-        if item["class_id"] in existing:
+        layer = existing.get(item["class_id"])
+        if layer is not None:
+            if RENAMED_SYSTEM_LAYERS.get(item["class_id"]) == layer.name:
+                layer.name = item["name"]
             continue
         session.add(
             Layer(
@@ -277,8 +296,16 @@ def seed(session: Session | None = None) -> None:
         session.flush()
 
         for item in OBJECT_CLASSES:
-            if session.get(ObjectClass, item["id"]) is None:
+            row = session.get(ObjectClass, item["id"])
+            if row is None:
                 session.add(ObjectClass(**item))
+            elif row.name != item["name"]:
+                row.name = item["name"]
+        session.flush()
+
+        # Users registered before new categories appeared get the missing auto layers.
+        for user in session.scalars(select(User)).all():
+            ensure_system_layers(session, user)
 
         for item in MODELS:
             if session.scalar(select(ModelRegistry).where(ModelRegistry.code == item["code"])) is None:

@@ -50,15 +50,16 @@ async def list_activity(
     db: AsyncSession,
     user: User,
     *,
-    category: str | None,
+    category: str | list[str] | None,
     q: str | None,
     order: str,
     limit: int,
     offset: int,
 ) -> dict[str, Any]:
     stmt = select(ActivityLog).where(ActivityLog.user_id == user.id)
-    if category:
-        stmt = stmt.where(ActivityLog.category == category)
+    categories = [category] if isinstance(category, str) else [c for c in category or [] if c]
+    if categories:
+        stmt = stmt.where(ActivityLog.category.in_(categories))
     if q:
         text_part, dates = parse_search(q)
         if text_part:
@@ -82,6 +83,10 @@ async def list_activity(
     else:
         stmt = stmt.order_by(ActivityLog.created_at.desc())
     total = (await db.execute(select(func.count()).select_from(stmt.subquery()))).scalar_one()
+    # Unfiltered size tells the UI "nothing found" apart from "no activity yet".
+    total_all = (
+        await db.execute(select(func.count()).select_from(ActivityLog).where(ActivityLog.user_id == user.id))
+    ).scalar_one()
     rows = (await db.execute(stmt.limit(limit).offset(offset))).scalars().all()
     return {
         "items": [
@@ -95,6 +100,7 @@ async def list_activity(
             for row in rows
         ],
         "total": int(total),
+        "total_all": int(total_all),
         "limit": limit,
         "offset": offset,
     }

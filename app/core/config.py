@@ -36,6 +36,9 @@ class Settings(BaseSettings):
     redis_url: str = "redis://localhost:6379/0"
     celery_queue_cpu: str = "cpu"
     celery_queue_gpu: str = "ml-gpu"
+    # Models load in worker_process_init; Celery SIGKILLs a pool child that has not
+    # reported UP within this many seconds (its own default is 4 s).
+    ml_worker_boot_timeout: float = 600.0
 
     s3_endpoint: str = "http://localhost:9000"
     s3_bucket: str = "agrovision"

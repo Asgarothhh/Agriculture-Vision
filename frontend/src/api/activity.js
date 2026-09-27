@@ -1,8 +1,8 @@
 import { api } from "./client.js";
 
-export function listActivity({ category, q, order = "newest", limit = 50, offset = 0 } = {}) {
+export function listActivity({ categories = [], q, order = "newest", limit = 50, offset = 0 } = {}) {
   const params = new URLSearchParams();
-  if (category) params.set("category", category);
+  categories.forEach((category) => params.append("category", category));
   if (q) params.set("q", q);
   if (order) params.set("order", order);
   params.set("limit", String(limit));

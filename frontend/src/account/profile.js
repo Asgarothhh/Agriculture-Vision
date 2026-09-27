@@ -1,8 +1,19 @@
 import * as authApi from "../api/auth.js";
 import * as activityApi from "../api/activity.js";
-import { $, confirmModal, openAppModal, closeAppModal, showToast } from "../ui.js";
+import { rememberEnabled } from "../api/client.js";
+import {
+  $,
+  PASSWORD_RULE_TEXT,
+  closeAppModal,
+  confirmModal,
+  downloadBlob,
+  escapeHtml,
+  openAppModal,
+  showToast,
+  validatePassword,
+} from "../ui.js";
 import { applyUser, logoutNow } from "../auth/session.js";
-import { loadMapData } from "../layers/store.js";
+import { showResultOverlay } from "../map/map.js";
 
 const UI_TO_API = {
   account: "account",
@@ -30,32 +41,61 @@ function iconFor(category) {
   return `<span class="history-icon type-${type}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">${d}</svg></span>`;
 }
 
+/** Password-change fields of the profile form: returns an error text or null. */
+export function passwordChangeError({ current, password, repeat }) {
+  if (!current && !password && !repeat) return null;
+  if (!current) return "Укажите текущий пароль";
+  if (!password) return "Введите новый пароль";
+  if (!validatePassword(password)) return PASSWORD_RULE_TEXT;
+  if (password !== repeat) return "Пароли не совпадают";
+  if (password === current) return "Новый пароль совпадает с текущим";
+  return null;
+}
+
 export async function saveProfile() {
-  const payload = {
-    first_name: $("prof-name").value.trim(),
-    last_name: $("prof-lastname").value.trim(),
-    organization: $("prof-org").value.trim(),
-  };
+  const first = $("prof-name").value.trim();
+  const last = $("prof-lastname").value.trim();
+  if (!first || !last) {
+    showToast("Имя и фамилия не могут быть пустыми", true);
+    return;
+  }
+  const payload = { first_name: first, last_name: last, organization: $("prof-org").value.trim() };
+  const current = $("prof-current-password")?.value || "";
   const password = $("prof-new-password").value;
-  const currentPassword = $("prof-current-password")?.value || "";
-  if (password) {
-    if (!currentPassword) {
-      showToast("Укажите текущий пароль", true);
-      return;
-    }
-    payload.current_password = currentPassword;
+  const repeat = $("prof-new-password2").value;
+  const error = passwordChangeError({ current, password, repeat });
+  if (error) {
+    showToast(error, true);
+    return;
+  }
+  const changingPassword = !!password;
+  if (changingPassword) {
+    payload.current_password = current;
     payload.password = password;
-    payload.password_repeat = $("prof-new-password2").value;
+    payload.password_repeat = repeat;
   }
   try {
     const me = await authApi.patchMe(payload);
+    if (changingPassword) {
+      // The server revokes every refresh token on a password change; get a fresh pair.
+      await authApi.login(me.email, password, rememberEnabled());
+    }
     applyUser(me);
-    if ($("prof-current-password")) $("prof-current-password").value = "";
+    $("prof-current-password").value = "";
     $("prof-new-password").value = "";
     $("prof-new-password2").value = "";
-    showToast("Профиль сохранён");
+    showToast(changingPassword ? "Пароль изменён" : "Профиль сохранён");
   } catch (err) {
     showToast(err.message, true);
+  }
+}
+
+/** Reload the «Экспортов» / «Обработано» counters from the server. */
+export async function refreshAccountStats() {
+  try {
+    applyUser(await authApi.getMe());
+  } catch {
+    /* counters stay as they were */
   }
 }
 
@@ -86,6 +126,7 @@ export async function deleteAccount() {
             await authApi.deleteMe($("delete-acc-password")?.value || "");
             closeAppModal();
             await logoutNow({ skipServer: true });
+            accountDeleteBusy = false;
           } catch (err) {
             accountDeleteBusy = false;
             showToast(err.message || "Неверный пароль", true);
@@ -96,29 +137,51 @@ export async function deleteAccount() {
   });
 }
 
+/** Categories to request, or null when nothing is checked (the feed is then empty). */
+export function historyCategories(checked, all) {
+  if (all) return [];
+  if (!checked.length) return null;
+  return checked.map((value) => UI_TO_API[value]).filter(Boolean);
+}
+
+/** Only finished processing has a result to open or download. */
+export function hasTaskResult(item) {
+  const payload = item?.payload || {};
+  if (!payload.task_id) return false;
+  return payload.status === "COMPLETED" || item.action === "Обработка снимка завершена";
+}
+
+let historyRequest = 0;
+
 export async function renderHistoryFeed() {
   const q = $("history-search")?.value || "";
   const order = $("history-sort")?.value || "newest";
   const checked = [...document.querySelectorAll(".history-filter-cat:checked")].map((el) => el.value);
-  const all = $("history-filter-all")?.checked;
-  const category = !all && checked.length === 1 ? UI_TO_API[checked[0]] : undefined;
+  const categories = historyCategories(checked, $("history-filter-all")?.checked);
+  const feed = $("history-feed");
+  if (categories === null) {
+    feed.innerHTML = `<p class="history-empty">Ничего не найдено</p>`;
+    return;
+  }
+  const request = ++historyRequest;
   try {
-    const data = await activityApi.listActivity({ q, order, category, limit: 50 });
-    const feed = $("history-feed");
+    const data = await activityApi.listActivity({ q, order, categories, limit: 200 });
+    if (request !== historyRequest) return; // a newer search is already on its way
     const items = data.items || [];
     if (!items.length) {
-      feed.innerHTML = `<p class="history-empty">${data.total ? "Ничего не найдено" : "Пока нет действий на аккаунте"}</p>`;
+      const empty = (data.total_all ?? data.total) ? "Ничего не найдено" : "Пока нет действий на аккаунте";
+      feed.innerHTML = `<p class="history-empty">${empty}</p>`;
       return;
     }
     feed.innerHTML = items
       .map((item) => {
-        const taskId = item.payload?.task_id;
+        const taskId = hasTaskResult(item) ? escapeHtml(item.payload.task_id) : "";
         return `<div class="history-row">
           ${iconFor(item.category)}
           <div>
-            <div class="history-text">${item.action}</div>
-            <div class="history-date">${CATEGORY_LABEL[item.category] || item.category} · ${new Date(item.created_at).toLocaleString("ru")}</div>
-            ${taskId ? `<button type="button" class="mini-btn" data-open-task="${taskId}">Открыть результат</button>
+            <div class="history-text">${escapeHtml(item.action)}</div>
+            <div class="history-date">${escapeHtml(CATEGORY_LABEL[item.category] || item.category)} · ${new Date(item.created_at).toLocaleString("ru")}</div>
+            ${taskId ? `<button type="button" class="mini-btn" data-open-task="${taskId}">Открыть</button>
               <button type="button" class="mini-btn" data-dl-task="${taskId}">Скачать результат</button>` : ""}
           </div>
         </div>`;
@@ -127,9 +190,9 @@ export async function renderHistoryFeed() {
     feed.querySelectorAll("[data-open-task]").forEach((btn) => {
       btn.onclick = async () => {
         try {
-          await activityApi.openActivityResult(btn.dataset.openTask);
-          await loadMapData();
-          showToast("Результат открыт на карте");
+          const geojson = await activityApi.openActivityResult(btn.dataset.openTask);
+          const count = showResultOverlay(geojson);
+          showToast(count ? `Результат открыт на карте: объектов ${count}` : "В этом результате нет объектов", !count);
         } catch (err) {
           showToast(err.message, true);
         }
@@ -139,13 +202,9 @@ export async function renderHistoryFeed() {
       btn.onclick = async () => {
         try {
           const payload = await activityApi.downloadActivityResult(btn.dataset.dlTask);
-          const blob = payload instanceof Blob ? payload : new Blob([JSON.stringify(payload)]);
-          const url = URL.createObjectURL(blob);
-          const a = document.createElement("a");
-          a.href = url;
-          a.download = `task-${btn.dataset.dlTask}.geojson`;
-          a.click();
-          URL.revokeObjectURL(url);
+          const blob =
+            payload instanceof Blob ? payload : new Blob([JSON.stringify(payload)], { type: "application/geo+json" });
+          downloadBlob(blob, `task-${btn.dataset.dlTask}.geojson`);
         } catch (err) {
           showToast(err.message, true);
         }

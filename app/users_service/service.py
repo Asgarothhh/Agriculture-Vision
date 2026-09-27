@@ -4,7 +4,7 @@ from datetime import UTC, datetime, timedelta
 import logging
 
 from fastapi import HTTPException, status
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.orm import selectinload
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -100,7 +100,7 @@ async def register_user(db: AsyncSession, data: RegisterRequest) -> TokenRespons
         await db.execute(select(User).where(User.username == str(data.email).lower()))
     ).scalar_one_or_none()
     if existing:
-        raise HTTPException(status.HTTP_409_CONFLICT, detail="Email already registered")
+        raise HTTPException(status.HTTP_409_CONFLICT, detail="Этот email уже зарегистрирован")
 
     role = await _role_by_name(db, _resolve_role_name(data.role))
     user = User(
@@ -210,6 +210,12 @@ async def request_password_reset(db: AsyncSession, email: str) -> dict:
     ).scalar_one_or_none()
     if last and last.created_at and (_utcnow() - last.created_at.replace(tzinfo=UTC)) < timedelta(minutes=1):
         raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, detail="Повторная отправка не чаще 1 раза в минуту")
+    # Only the newest code is valid: an older one (maybe seen by someone else) stops working.
+    await db.execute(
+        update(PasswordResetCode)
+        .where(PasswordResetCode.user_id == user.id, PasswordResetCode.used_at.is_(None))
+        .values(used_at=_utcnow())
+    )
     code = generate_reset_code()
     db.add(
         PasswordResetCode(
@@ -258,7 +264,18 @@ async def confirm_password_reset(db: AsyncSession, data: PasswordResetConfirm) -
         raise HTTPException(status.HTTP_400_BAD_REQUEST, detail="Неверный или просроченный код")
     row.used_at = _utcnow()
     user.password_hash = hash_password(data.new_password)
+    await _revoke_refresh_tokens(db, user)
+    db.add(ActivityLog(user_id=user.id, category="account", action="Пароль восстановлен по коду из письма"))
     await db.commit()
+
+
+async def _revoke_refresh_tokens(db: AsyncSession, user: User) -> None:
+    """Log out every session: after a password change old refresh tokens must not work."""
+    await db.execute(
+        update(RefreshToken)
+        .where(RefreshToken.user_id == user.id, RefreshToken.revoked_at.is_(None))
+        .values(revoked_at=_utcnow())
+    )
 
 
 async def profile_payload(db: AsyncSession, user: User) -> dict:
@@ -291,6 +308,12 @@ async def profile_payload(db: AsyncSession, user: User) -> dict:
 
 
 async def update_profile(db: AsyncSession, user: User, data: ProfileUpdate) -> User:
+    if data.password:
+        if not verify_password(data.current_password or "", user.password_hash):
+            raise HTTPException(status.HTTP_403_FORBIDDEN, detail="Неверный текущий пароль")
+        if verify_password(data.password, user.password_hash):
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, detail="Новый пароль совпадает с текущим")
+    before = (user.first_name, user.last_name, user.organization)
     if data.first_name is not None:
         user.first_name = data.first_name
     if data.last_name is not None:
@@ -299,10 +322,13 @@ async def update_profile(db: AsyncSession, user: User, data: ProfileUpdate) -> U
         user.organization = data.organization
     if data.avatar_meta is not None:
         user.avatar_meta = data.avatar_meta
+    if (user.first_name, user.last_name, user.organization) != before:
+        db.add(ActivityLog(user_id=user.id, category="account", action="Изменены данные профиля"))
     if data.password:
-        if not verify_password(data.current_password or "", user.password_hash):
-            raise HTTPException(status.HTTP_403_FORBIDDEN, detail="Неверный текущий пароль")
         user.password_hash = hash_password(data.password)
+        # The client logs in again with the new password right after this call.
+        await _revoke_refresh_tokens(db, user)
+        db.add(ActivityLog(user_id=user.id, category="account", action="Пароль изменён"))
     await db.commit()
     await db.refresh(user)
     return user

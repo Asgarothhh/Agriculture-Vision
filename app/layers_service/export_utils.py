@@ -69,14 +69,30 @@ def _kml_color(hex_color: str | None, opacity: str = "ff") -> str:
     return f"{opacity}{b}{g}{r}"
 
 
+SHAPEFILE_GROUPS = {
+    "Point": "points",
+    "MultiPoint": "points",
+    "LineString": "lines",
+    "MultiLineString": "lines",
+    "Polygon": "polygons",
+    "MultiPolygon": "polygons",
+}
+
+
 def geojson_to_shapefile_zip(geojson: dict[str, Any]) -> bytes:
+    """Zip of shapefiles, one per geometry family (a .shp holds a single geometry type)."""
     import geopandas as gpd
 
-    rows = []
+    groups: dict[str, list[dict[str, Any]]] = {}
     for feature in geojson.get("features", []):
-        geom = shape(feature["geometry"]) if feature.get("geometry") else None
+        if not feature.get("geometry"):
+            continue
+        geom = shape(feature["geometry"])
+        group = SHAPEFILE_GROUPS.get(geom.geom_type)
+        if group is None or geom.is_empty:
+            continue
         props = feature.get("properties") or {}
-        rows.append(
+        groups.setdefault(group, []).append(
             {
                 "name": str(props.get("name") or "")[:50],
                 "layer": str(props.get("layer_name") or "")[:50],
@@ -87,16 +103,15 @@ def geojson_to_shapefile_zip(geojson: dict[str, Any]) -> bytes:
                 "geometry": geom,
             }
         )
-    if not rows:
-        gdf = gpd.GeoDataFrame(columns=["name", "geometry"], geometry="geometry", crs="EPSG:4326")
-    else:
-        gdf = gpd.GeoDataFrame(rows, geometry="geometry", crs="EPSG:4326")
+    if not groups:
+        raise ValueError("no objects to export")
     with tempfile.TemporaryDirectory() as tmp:
-        shp_path = Path(tmp) / "export.shp"
-        gdf.to_file(shp_path, driver="ESRI Shapefile")
+        for group, rows in groups.items():
+            gdf = gpd.GeoDataFrame(rows, geometry="geometry", crs="EPSG:4326")
+            gdf.to_file(Path(tmp) / f"layers_{group}.shp", driver="ESRI Shapefile", encoding="utf-8")
         buffer = io.BytesIO()
         with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as zf:
-            for file in Path(tmp).iterdir():
+            for file in sorted(Path(tmp).iterdir()):
                 zf.write(file, arcname=file.name)
         return buffer.getvalue()
 

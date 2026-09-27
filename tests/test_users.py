@@ -57,21 +57,29 @@ def test_profile_update_password_requires_current():
     assert payload.password == "ValidPass2!"
 
 
-def test_password_reset_confirm_requires_four_digits():
-    with pytest.raises(ValidationError):
-        PasswordResetConfirm(
-            email="ivan@example.com",
-            code="123456",
-            new_password="ValidPass2!",
-            new_password_repeat="ValidPass2!",
-        )
+def test_password_reset_confirm_requires_six_digits():
+    for bad in ("1234", "1234567", "12a456"):
+        with pytest.raises(ValidationError):
+            PasswordResetConfirm(
+                email="ivan@example.com",
+                code=bad,
+                new_password="ValidPass2!",
+                new_password_repeat="ValidPass2!",
+            )
     payload = PasswordResetConfirm(
         email="ivan@example.com",
-        code="1234",
+        code="123456",
         new_password="ValidPass2!",
         new_password_repeat="ValidPass2!",
     )
-    assert payload.code == "1234"
+    assert payload.code == "123456"
+
+
+def test_generated_reset_code_has_six_digits():
+    from app.core.security import generate_reset_code
+
+    codes = {generate_reset_code() for _ in range(50)}
+    assert all(len(code) == 6 and code.isdigit() for code in codes)
 
 
 def test_openapi_has_auth_and_profile_paths(client):

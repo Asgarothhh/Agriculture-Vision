@@ -75,8 +75,11 @@ def decode_token(token: str) -> dict[str, Any]:
         raise ValueError("Invalid token") from exc
 
 
+RESET_CODE_DIGITS = 6
+
+
 def generate_reset_code() -> str:
-    return f"{secrets.randbelow(10_000):04d}"
+    return f"{secrets.randbelow(10 ** RESET_CODE_DIGITS):0{RESET_CODE_DIGITS}d}"
 
 
 def new_jti() -> str:

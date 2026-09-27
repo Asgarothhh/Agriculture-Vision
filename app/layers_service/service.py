@@ -11,7 +11,7 @@ from uuid import UUID
 from fastapi import HTTPException, UploadFile, status
 from geoalchemy2.functions import ST_AsGeoJSON, ST_Area, ST_Collect, ST_MakeValid, ST_Transform, ST_UnaryUnion
 from geoalchemy2.shape import to_shape
-from shapely import make_valid
+from shapely import force_2d, make_valid
 from shapely.geometry import shape
 from sqlalchemy import delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -99,7 +99,12 @@ async def update_layer(db: AsyncSession, user: User, layer_id: UUID, data: Layer
         layer.color = data.color
     if data.is_visible is not None:
         layer.is_visible = data.is_visible
-    if data.folder_id is not None:
+    if "folder_id" in data.model_fields_set:
+        # An explicit null takes the layer out of its folder.
+        if data.folder_id is not None:
+            owned = await db.scalar(select(Folder.id).where(Folder.id == data.folder_id, Folder.user_id == user.id))
+            if owned is None:
+                raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Folder not found")
         layer.folder_id = data.folder_id
     await db.commit()
     await db.refresh(layer)
@@ -330,23 +335,52 @@ async def merge_objects(db: AsyncSession, user: User, data: MergeRequest) -> dic
     return await object_payload(db, keep)
 
 
-async def import_file(db: AsyncSession, user: User, upload: UploadFile) -> dict[str, Any]:
-    filename = upload.filename or "import"
-    data = await upload.read()
-    features: list[dict[str, Any]] = []
+def _read_import_features(filename: str, data: bytes) -> list[dict[str, Any]]:
     suffix = Path(filename).suffix.lower()
     if suffix in {".geojson", ".json"}:
-        payload = json.loads(data.decode("utf-8"))
+        try:
+            payload = json.loads(data.decode("utf-8-sig"))
+        except (UnicodeDecodeError, ValueError) as exc:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, detail=f"Не удалось прочитать GeoJSON: {exc}") from exc
+        if not isinstance(payload, dict):
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, detail="Не удалось прочитать GeoJSON: ожидается объект")
         if payload.get("type") == "FeatureCollection":
-            features = payload.get("features") or []
-        elif payload.get("type") == "Feature":
-            features = [payload]
-        else:
-            features = [{"type": "Feature", "geometry": payload, "properties": {}}]
-    elif suffix == ".zip":
-        features = _features_from_shapefile_zip(data)
-    else:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, detail="Поддерживаются GeoJSON и Shapefile (.zip)")
+            return [f for f in payload.get("features") or [] if isinstance(f, dict)]
+        if payload.get("type") == "Feature":
+            return [payload]
+        return [{"type": "Feature", "geometry": payload, "properties": {}}]
+    if suffix == ".zip":
+        try:
+            return _features_from_shapefile_zip(data)
+        except HTTPException:
+            raise
+        except Exception as exc:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, detail=f"Не удалось прочитать Shapefile: {exc}") from exc
+    raise HTTPException(status.HTTP_400_BAD_REQUEST, detail="Поддерживаются GeoJSON и Shapefile (.zip)")
+
+
+async def import_file(db: AsyncSession, user: User, upload: UploadFile) -> dict[str, Any]:
+    filename = upload.filename or "import"
+    features = _read_import_features(filename, await upload.read())
+    # Validate every geometry before creating the layer: no empty "ghost" layer on bad input.
+    parsed: list[tuple[int, Any, dict[str, Any]]] = []
+    for idx, feature in enumerate(features, start=1):
+        geom = feature.get("geometry")
+        if not geom:
+            continue
+        try:
+            shapely_geom = force_2d(shape(geom))
+        except Exception as exc:
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST, detail=f"Не удалось прочитать объект №{idx}: {exc}"
+            ) from exc
+        if shapely_geom.is_empty:
+            continue
+        if not shapely_geom.is_valid:
+            shapely_geom = make_valid(shapely_geom)
+        parsed.append((idx, shapely_geom, feature.get("properties") or {}))
+    if not parsed:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, detail="Файл прочитан, но в нём нет объектов")
 
     layer = Layer(
         user_id=user.id,
@@ -359,32 +393,27 @@ async def import_file(db: AsyncSession, user: User, upload: UploadFile) -> dict[
     await db.flush()
     xs: list[float] = []
     ys: list[float] = []
-    for idx, feature in enumerate(features, start=1):
-        geom = feature.get("geometry")
-        if not geom:
-            continue
-        shapely_geom = shape(geom)
-        if shapely_geom.is_empty:
-            continue
+    for idx, shapely_geom, props in parsed:
         bounds = shapely_geom.bounds
         xs.extend([bounds[0], bounds[2]])
         ys.extend([bounds[1], bounds[3]])
-        props = feature.get("properties") or {}
-        obj = LayerObject(
-            layer_id=layer.id,
-            name=str(props.get("name") or props.get("NAME") or f"Объект {idx}"),
-            number=idx,
-            geom=wkb_element(shapely_geom, 4326),
-            is_point=shapely_geom.geom_type == "Point",
-            origin="manual",
+        db.add(
+            LayerObject(
+                layer_id=layer.id,
+                name=str(props.get("name") or props.get("NAME") or f"Объект {idx}"),
+                number=idx,
+                geom=wkb_element(shapely_geom, 4326),
+                is_point=shapely_geom.geom_type == "Point",
+                origin="manual",
+            )
         )
-        db.add(obj)
     await db.commit()
-    bbox = None
-    if xs and ys:
-        bbox = [min(xs), min(ys), max(xs), max(ys)]
-    await log_event(db, user.id, "export", f"Импорт {filename}", {"layer_id": str(layer.id)}, commit=True)
-    return {"layer": _layer_dict(layer, len(features)), "bbox": bbox}
+    bbox = [min(xs), min(ys), max(xs), max(ys)]
+    # An import is a map action; logging it as "export" inflated the exports counter.
+    await log_event(
+        db, user.id, "map_tools", f"Импортирован слой из файла «{filename}»", {"layer_id": str(layer.id)}, commit=True
+    )
+    return {"layer": _layer_dict(layer, len(parsed)), "bbox": bbox}
 
 
 def _features_from_shapefile_zip(data: bytes) -> list[dict[str, Any]]:
@@ -404,7 +433,7 @@ def _features_from_shapefile_zip(data: bytes) -> list[dict[str, Any]]:
         return json.loads(gdf.to_json())["features"]
 
 
-async def export_layers(db: AsyncSession, user: User, data: ExportRequest) -> tuple[bytes, str, str]:
+async def export_layers(db: AsyncSession, user: User, data: ExportRequest) -> tuple[bytes, str, str, int]:
     stmt = (
         select(Layer)
         .options(selectinload(Layer.objects), selectinload(Layer.folder))
@@ -439,18 +468,23 @@ async def export_layers(db: AsyncSession, user: User, data: ExportRequest) -> tu
             }
         )
     geojson = objects_to_geojson(packed)
+    count = len(geojson.get("features") or [])
+    if count == 0:
+        raise HTTPException(status.HTTP_409_CONFLICT, detail="Нет объектов для экспорта")
+    if data.format == "geojson":
+        result = json.dumps(geojson, ensure_ascii=False).encode("utf-8"), "application/geo+json", "layers.geojson"
+    elif data.format == "kml":
+        result = geojson_to_kml(geojson), "application/vnd.google-earth.kml+xml", "layers.kml"
+    elif data.format == "shapefile":
+        result = geojson_to_shapefile_zip(geojson), "application/zip", "layers.zip"
+    else:
+        result = geojson_to_svg(geojson), "image/svg+xml", "layers.svg"
     await log_event(
         db,
         user.id,
         "export",
-        f"Экспорт слоёв ({data.format})",
-        {"format": data.format, "count": len(packed)},
+        f"Экспорт слоёв ({data.format}): объектов {count}",
+        {"format": data.format, "count": count},
         commit=True,
     )
-    if data.format == "geojson":
-        return json.dumps(geojson, ensure_ascii=False).encode("utf-8"), "application/geo+json", "layers.geojson"
-    if data.format == "kml":
-        return geojson_to_kml(geojson), "application/vnd.google-earth.kml+xml", "layers.kml"
-    if data.format == "shapefile":
-        return geojson_to_shapefile_zip(geojson), "application/zip", "layers.zip"
-    return geojson_to_svg(geojson), "image/svg+xml", "layers.svg"
+    return (*result, count)

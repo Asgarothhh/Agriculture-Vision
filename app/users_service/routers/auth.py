@@ -55,7 +55,9 @@ async def password_reset_request(
 
 
 @router.post("/password-reset/confirm")
+@limiter.limit("10/minute")
 async def password_reset_confirm(
+    request: Request,
     payload: PasswordResetConfirm,
     db: Annotated[AsyncSession, Depends(get_db)],
 ):

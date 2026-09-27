@@ -116,7 +116,9 @@ deploy-k8s:
     - kubectl apply -f k8s/configmap.yaml
     - kubectl apply -f k8s/postgres.yaml
     - kubectl apply -f k8s/redis.yaml
+    - kubectl apply -f k8s/minio.yaml
     - kubectl rollout status deployment/postgres-deployment -n "$KUBE_NAMESPACE" --timeout=180s
+    - kubectl rollout status deployment/minio-deployment -n "$KUBE_NAMESPACE" --timeout=180s
     - tmpdir="$(mktemp -d)"
     - sed "s|API_IMAGE_PLACEHOLDER|$API_IMAGE:$CI_COMMIT_SHORT_SHA|g" k8s/api-deployment.yaml > "$tmpdir/api.yaml"
     - sed "s|WORKER_IMAGE_PLACEHOLDER|$WORKER_IMAGE:$CI_COMMIT_SHORT_SHA|g" k8s/worker-deployment.yaml > "$tmpdir/worker.yaml"
@@ -130,6 +132,7 @@ deploy-k8s:
     - kubectl get pods -n "$KUBE_NAMESPACE" -o wide
     - kubectl get svc -n "$KUBE_NAMESPACE"
     - bash deploy/smoke-cluster.sh
+    - bash deploy/refresh-host-nginx.sh
   after_script:
     - echo "=== ОТЛАДОЧНАЯ ИНФОРМАЦИЯ ПРИ ОШИБКЕ ==="
     - kubectl get pods -n "$KUBE_NAMESPACE" -o wide || true
@@ -147,6 +150,9 @@ deploy-k8s:
     - kubectl get pods -n "$KUBE_NAMESPACE" -l app=agri-nginx || true
     - kubectl describe pods -n "$KUBE_NAMESPACE" -l app=agri-nginx || true
     - kubectl logs -n "$KUBE_NAMESPACE" -l app=agri-nginx --tail=50 || true
+    - echo "=== MINIO ==="
+    - kubectl get pods -n "$KUBE_NAMESPACE" -l app=minio || true
+    - kubectl logs -n "$KUBE_NAMESPACE" -l app=minio --tail=50 || true
   rules:
     - if: '$CI_COMMIT_BRANCH == "dev"'
     - if: '$CI_COMMIT_BRANCH == "main"'

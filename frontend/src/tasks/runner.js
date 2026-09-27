@@ -3,7 +3,8 @@ import { $, confirmModal, showToast, withTimeout } from "../ui.js";
 import { captureMapJpeg, clearAoi, getAoiGeoJson, getViewBounds } from "../map/map.js";
 import { loadMapData, selectedClassIds } from "../layers/store.js";
 import { clearUndo } from "../map/undo.js";
-import { SEG_STAGES, clampPercent, humanizeSegError, taskStage } from "./progress.js";
+import { SEG_STAGES, clampPercent, humanizeSegError, mlPillState, mlPillTitle, taskStage } from "./progress.js";
+import { refreshAccountStats } from "../account/profile.js";
 
 const HEALTH_TIMEOUT_MS = 10000;
 
@@ -86,7 +87,8 @@ export async function runTask({ file, geoBounds, aoi, architecture, onStage }) {
     aoi,
     geoBounds,
   });
-  const taskId = created.task_id || created.id;
+  const taskId = created?.task_id || created?.id;
+  if (!taskId) throw new Error("Сервер не вернул идентификатор задачи обработки");
   onStage?.(taskStage(created));
   const task = await tasksApi.pollTask(taskId, {
     onProgress: (item) => onStage?.(taskStage(item)),
@@ -98,6 +100,7 @@ export async function runTask({ file, geoBounds, aoi, architecture, onStage }) {
   const published = await tasksApi.publishToLayers(taskId, selectedClassIds());
   await loadMapData();
   clearUndo();
+  refreshAccountStats();
   return { task, created: Number(published?.created) || 0 };
 }
 
@@ -178,25 +181,52 @@ export async function runSegmentation(architecture) {
   }
 }
 
-export async function refreshMlHealth() {
+function paintMlPill(state, title) {
   const el = $("status-ml");
-  try {
-    const health = await tasksApi.modelsHealth();
-    const loaded = (health.models || []).filter((m) => m.loaded).map((m) => m.code);
-    el.classList.remove("status-online", "status-idle", "status-offline", "offline");
-    if (health.status === "ready") {
-      el.textContent = `ML · ${loaded.join(",") || "ready"}`;
-      el.classList.add("status-online");
-    } else {
-      el.textContent = "ML недоступен";
-      el.classList.add("status-idle");
-    }
-    el.title = JSON.stringify(health);
-  } catch {
-    el.textContent = "ML недоступен";
-    el.classList.remove("status-online");
-    el.classList.add("status-idle");
+  if (!el) return;
+  el.classList.remove("status-online", "status-idle", "status-offline", "offline");
+  el.classList.add(state.cls);
+  el.textContent = state.text;
+  el.title = title;
+}
+
+export async function refreshMlHealth() {
+  if (!navigator.onLine) {
+    paintMlPill(mlPillState(null, { online: false }), "Нет подключения к интернету");
+    return;
   }
+  try {
+    const health = await withTimeout(tasksApi.modelsHealth(), HEALTH_TIMEOUT_MS, "ML-сервер не ответил");
+    paintMlPill(mlPillState(health), mlPillTitle(health));
+  } catch (err) {
+    paintMlPill(mlPillState(null, { online: navigator.onLine, failed: true }), err.message || "ML-сервер не отвечает");
+  }
+}
+
+const ML_POLL_MS = 30000;
+let mlPollTimer = null;
+let mlPollBound = false;
+
+function onMlVisibility() {
+  if (document.visibilityState === "visible") refreshMlHealth();
+}
+
+/** Spec 4: refresh every 30 s, right after the connection returns and on returning to the tab. */
+export function startMlHealthPolling() {
+  stopMlHealthPolling();
+  refreshMlHealth();
+  mlPollTimer = setInterval(refreshMlHealth, ML_POLL_MS);
+  if (!mlPollBound) {
+    window.addEventListener("online", refreshMlHealth);
+    window.addEventListener("offline", refreshMlHealth);
+    document.addEventListener("visibilitychange", onMlVisibility);
+    mlPollBound = true;
+  }
+}
+
+export function stopMlHealthPolling() {
+  if (mlPollTimer) clearInterval(mlPollTimer);
+  mlPollTimer = null;
 }
 
 export async function renderClassToggles() {

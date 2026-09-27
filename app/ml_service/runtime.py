@@ -13,6 +13,63 @@ logger = logging.getLogger(__name__)
 
 ROOT = Path(__file__).resolve().parents[2]
 
+# ObjectClass ids (app/core/seed.py). SegFormer outputs field outlines only.
+FIELD_CLASS_ID = 2
+# YOLO class names from config/data.yaml -> ObjectClass ids of the spec categories.
+YOLO_NAME_TO_CLASS: dict[str, int] = {
+    "double_plant": 21,
+    "drydown": 22,
+    "endrow": 23,
+    "water": 4,
+    "waterway": 24,
+    "weed_cluster": 25,
+    "planter_skip": 26,
+    "nutrient_deficiency": 27,
+    "storm_damage": 28,
+}
+POINT_CLASS_IDS = frozenset({5, 6, 26})
+
+
+def yolo_class_id(names: Any, cls: int) -> int | None:
+    """Spec class id for a YOLO class index, or None for classes the app does not know."""
+    name = names.get(cls) if isinstance(names, dict) else (names[cls] if 0 <= cls < len(names) else None)
+    if name is None:
+        return None
+    return YOLO_NAME_TO_CLASS.get(str(name).strip().lower())
+
+
+def _point_from_outline(poly: np.ndarray, class_id: int, confidence: float) -> dict[str, Any]:
+    xs = poly[:, 0]
+    ys = poly[:, 1]
+    radius = float(max(xs.max() - xs.min(), ys.max() - ys.min()) / 2)
+    return {
+        "class_id": class_id,
+        "confidence": confidence,
+        "geometry": {"type": "Point", "coordinates": [float(xs.mean()), float(ys.mean())]},
+        "radius_approx": radius,
+        "area_approx": float(np.pi * radius * radius),
+    }
+
+
+def segformer_polygons(items: Any, confidence: float, sx: float = 1.0, sy: float = 1.0) -> list[dict[str, Any]]:
+    """Convert segmentation_service PolygonItem.polygon_px outlines to inference features."""
+    polygons: list[dict[str, Any]] = []
+    for item in items or []:
+        coords = getattr(item, "polygon_px", None) or []
+        if len(coords) < 3 or getattr(item, "valid", True) is False:
+            continue
+        ring = [[float(x) * sx, float(y) * sy] for x, y in coords]
+        if ring[0] != ring[-1]:
+            ring.append(ring[0])
+        polygons.append(
+            {
+                "class_id": FIELD_CLASS_ID,
+                "confidence": confidence,
+                "geometry": {"type": "Polygon", "coordinates": [ring]},
+            }
+        )
+    return polygons
+
 
 class ModelRuntime:
     """Loads fine-tuned YOLO / SegFormer weights from disk and runs inference in-process."""
@@ -137,93 +194,93 @@ class ModelRuntime:
     def _run_yolo(self, image: np.ndarray, confidence: float) -> dict[str, Any]:
         if self._yolo is None:
             raise RuntimeError("YOLO weights are not loaded")
-        results = self._yolo.predict(image, conf=confidence, verbose=False)
+        import cv2
+
+        # _decode_image yields RGB; Ultralytics treats numpy input as BGR.
+        bgr = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
+        results = self._yolo.predict(bgr, conf=confidence, verbose=False)
+        names = getattr(self._yolo, "names", None) or {}
         polygons: list[dict[str, Any]] = []
         points: list[dict[str, Any]] = []
-        class_map = {0: 2, 5: 5, 6: 6, 7: 4, 9: 3}
         for result in results:
             boxes = getattr(result, "boxes", None)
             masks = getattr(result, "masks", None)
-            if masks is not None and getattr(masks, "xy", None):
+            result_names = getattr(result, "names", None) or names
+            if masks is not None and getattr(masks, "xy", None) is not None and len(masks.xy):
                 for idx, poly in enumerate(masks.xy):
-                    cls = int(boxes.cls[idx]) if boxes is not None else 0
-                    conf = float(boxes.conf[idx]) if boxes is not None else confidence
-                    mapped = class_map.get(cls, 2)
-                    if mapped in {5, 6}:
-                        xs = poly[:, 0]
-                        ys = poly[:, 1]
-                        cx, cy = float(xs.mean()), float(ys.mean())
-                        radius = float(max(xs.max() - xs.min(), ys.max() - ys.min()) / 2)
-                        points.append(
-                            {
-                                "class_id": mapped,
-                                "confidence": conf,
-                                "geometry": {"type": "Point", "coordinates": [cx, cy]},
-                                "radius_approx": radius,
-                                "area_approx": float(np.pi * radius * radius),
-                            }
-                        )
+                    if boxes is None:
+                        continue
+                    class_id = yolo_class_id(result_names, int(boxes.cls[idx]))
+                    if class_id is None or len(poly) < 3:
+                        continue
+                    conf = float(boxes.conf[idx])
+                    if class_id in POINT_CLASS_IDS:
+                        points.append(_point_from_outline(poly, class_id, conf))
                     else:
                         ring = [[float(x), float(y)] for x, y in poly]
-                        if ring and ring[0] != ring[-1]:
+                        if ring[0] != ring[-1]:
                             ring.append(ring[0])
                         polygons.append(
                             {
-                                "class_id": mapped,
+                                "class_id": class_id,
                                 "confidence": conf,
                                 "geometry": {"type": "Polygon", "coordinates": [ring]},
                             }
                         )
             elif boxes is not None:
                 for box in boxes:
-                    cls = int(box.cls)
-                    conf = float(box.conf)
-                    mapped = class_map.get(cls, 5)
-                    xyxy = box.xyxy[0].tolist()
-                    cx = (xyxy[0] + xyxy[2]) / 2
-                    cy = (xyxy[1] + xyxy[3]) / 2
-                    points.append(
-                        {
-                            "class_id": mapped if mapped in {5, 6} else 5,
-                            "confidence": conf,
-                            "geometry": {
-                                "type": "Point",
-                                "coordinates": [float(cx), float(cy)],
-                            },
-                        }
-                    )
+                    class_id = yolo_class_id(result_names, int(box.cls))
+                    if class_id is None:
+                        continue
+                    x0, y0, x1, y1 = (float(v) for v in box.xyxy[0].tolist())
+                    if class_id in POINT_CLASS_IDS:
+                        points.append(
+                            {
+                                "class_id": class_id,
+                                "confidence": float(box.conf),
+                                "geometry": {"type": "Point", "coordinates": [(x0 + x1) / 2, (y0 + y1) / 2]},
+                            }
+                        )
+                    else:
+                        ring = [[x0, y0], [x1, y0], [x1, y1], [x0, y1], [x0, y0]]
+                        polygons.append(
+                            {
+                                "class_id": class_id,
+                                "confidence": float(box.conf),
+                                "geometry": {"type": "Polygon", "coordinates": [ring]},
+                            }
+                        )
         return {"model": "yolo_seg_26", "polygons": polygons, "points": points}
 
     def _run_segformer(self, image: np.ndarray, confidence: float) -> dict[str, Any]:
         if self._segformer is None:
             raise RuntimeError("SegFormer weights are not loaded")
         import cv2
-        from segmentation_service.pipeline import run_segmentation
-        from segmentation_service.schemas import SegmentRequest
 
-        request = SegmentRequest(threshold=confidence, include_geojson=True)
-        result = run_segmentation(self._segformer, image, None, request)
-        polygons: list[dict[str, Any]] = []
-        for item in result.polygons or []:
-            coords = getattr(item, "coordinates", None) or []
-            if len(coords) < 3:
-                continue
-            ring = [[float(p[0]), float(p[1])] for p in coords]
-            ring.append(ring[0])
-            polygons.append(
-                {
-                    "class_id": 2,
-                    "confidence": float(getattr(item, "confidence", None) or confidence),
-                    "geometry": {"type": "Polygon", "coordinates": [ring]},
-                }
-            )
-        if not polygons and getattr(result, "mask_png_b64", None):
+        try:
+            from segmentation_service.pipeline import run_segmentation
+            from segmentation_service.schemas import SegmentRequest
+        except ModuleNotFoundError:
+            from app.segmentation_service.pipeline import run_segmentation
+            from app.segmentation_service.schemas import SegmentRequest
+
+        request = SegmentRequest(threshold=confidence, include_mask_png=True)
+        result = run_segmentation(self._segformer, rgb=image, request=request)
+        # The pipeline downsizes frames larger than max_side_px; map back to source pixels.
+        src_h, src_w = image.shape[:2]
+        out_h, out_w = result.image_hw
+        sx = src_w / out_w if out_w else 1.0
+        sy = src_h / out_h if out_h else 1.0
+        polygons = segformer_polygons(result.polygons, confidence, sx, sy)
+        if not polygons and result.mask_png_base64:
             import base64
 
-            raw = base64.b64decode(result.mask_png_b64)
+            raw = base64.b64decode(result.mask_png_base64)
             mask = cv2.imdecode(np.frombuffer(raw, dtype=np.uint8), cv2.IMREAD_GRAYSCALE)
             if mask is not None:
-                polygons.extend(_mask_to_polygons(mask, 2, confidence))
+                if mask.shape[:2] != (src_h, src_w):
+                    mask = cv2.resize(mask, (src_w, src_h), interpolation=cv2.INTER_NEAREST)
+                polygons.extend(_mask_to_polygons(mask, FIELD_CLASS_ID, confidence))
         return {"model": "segformer", "polygons": polygons, "points": []}
 
 
