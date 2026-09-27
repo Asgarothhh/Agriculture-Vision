@@ -1,10 +1,13 @@
 import { dzzEnsureTileBlob, dzzPrefetch } from "../dzz/tiles.js";
 import { getActiveBasemapTileUrl, toSameOriginDzzUrl } from "../dzz/urls.js";
-import { withTimeout } from "../ui.js";
+import { isSecurityError, withTimeout } from "../ui.js";
 
 const DEFAULT_CENTER = [53.9, 27.55];
 const DEFAULT_ZOOM = 13;
 const TILE_OPTS = { maxZoom: 19, keepBuffer: 4, updateWhenZooming: true };
+const ESRI_PROXY_TEMPLATE = "/basemap/esri/{z}/{y}/{x}";
+const ESRI_DIRECT_TEMPLATE =
+  "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}";
 
 let map;
 let tileSatellite;
@@ -73,10 +76,17 @@ export function initMap() {
   }
   map = L.map("map", { zoomControl: false }).setView(DEFAULT_CENTER, DEFAULT_ZOOM);
   L.control.zoom({ position: "bottomleft" }).addTo(map);
-  tileSatellite = L.tileLayer("/basemap/esri/{z}/{y}/{x}", {
+  tileSatellite = L.tileLayer(ESRI_PROXY_TEMPLATE, {
     ...TILE_OPTS,
     attribution: "Esri",
     crossOrigin: "anonymous",
+  });
+  // The entry nginx (e.g. behind the remote-access IP) may lack /basemap/esri/.
+  // Esri serves tiles with CORS, so the direct URL keeps the canvas clean too.
+  tileSatellite.on("tileerror", ({ tile, coords }) => {
+    if (!tile || tile.dataset.esriDirect) return;
+    tile.dataset.esriDirect = "1";
+    tile.src = L.Util.template(ESRI_DIRECT_TEMPLATE, coords);
   });
   tileScheme = L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
     ...TILE_OPTS,
@@ -245,37 +255,45 @@ export function clearFeatures() {
   featureGroup.clearLayers();
 }
 
-function tileUrl(src) {
+const TILE_FETCH_TIMEOUT_MS = 8000;
+
+async function fetchTileBitmap(src) {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), TILE_FETCH_TIMEOUT_MS);
   try {
-    return new URL(src, window.location.href);
-  } catch {
-    return null;
+    const res = await fetch(src, { mode: "cors", credentials: "same-origin", signal: ctrl.signal });
+    if (!res.ok) return null;
+    const type = (res.headers.get("content-type") || "").toLowerCase();
+    // An SPA fallback (index.html) instead of a tile means the proxy location is missing.
+    if (type && !type.startsWith("image/")) return null;
+    return await createImageBitmap(await res.blob());
+  } finally {
+    clearTimeout(timer);
   }
 }
 
-async function paintTile(ctx, img, mapPos) {
+function intersects(r, box) {
+  return r.right > box.left && r.left < box.right && r.bottom > box.top && r.top < box.bottom;
+}
+
+async function paintTile(ctx, img, origin, box) {
   const r = img.getBoundingClientRect();
-  const dx = r.left - mapPos.left;
-  const dy = r.top - mapPos.top;
-  if (r.width < 1 || r.height < 1) return false;
+  if (r.width < 1 || r.height < 1 || !intersects(r, box)) return false;
+  const dx = r.left - origin.left;
+  const dy = r.top - origin.top;
   const src = img.currentSrc || img.src;
   if (!src) return false;
-  // A cross-origin <img> drawn directly taints the canvas. Firefox then rejects
-  // toBlob with "The operation is insecure." Only same-origin and CORS blobs are safe.
   if (src.startsWith("blob:") || src.startsWith("data:")) {
+    if (!img.complete || !img.naturalWidth) return false;
     ctx.drawImage(img, dx, dy, r.width, r.height);
     return true;
   }
-  const url = tileUrl(src);
-  if (!url) return false;
-  if (url.origin === window.location.origin) {
-    ctx.drawImage(img, dx, dy, r.width, r.height);
-    return true;
-  }
-  const res = await fetch(url.href, { mode: "cors", credentials: "omit" });
-  if (!res.ok) return false;
-  const blob = await res.blob();
-  const bmp = await createImageBitmap(blob);
+  // Never draw a network <img> itself: if its bytes ever came from another origin
+  // without CORS (redirect, proxy, custom basemap, another entry IP/port) the canvas
+  // is tainted and toBlob throws SecurityError ("The operation is insecure." in
+  // Firefox). A CORS fetch either yields clean pixels or fails, so the canvas stays clean.
+  const bmp = await fetchTileBitmap(src);
+  if (!bmp) return false;
   try {
     ctx.drawImage(bmp, dx, dy, r.width, r.height);
   } finally {
@@ -284,41 +302,72 @@ async function paintTile(ctx, img, mapPos) {
   return true;
 }
 
+/** Pixel rectangle (container coords) to capture: the AOI clipped to the view, or the whole view. */
+function captureRect() {
+  const size = map.getSize();
+  if (!aoiLayer) return { x: 0, y: 0, w: size.x, h: size.y };
+  const b = aoiLayer.getBounds();
+  const nw = map.latLngToContainerPoint(b.getNorthWest());
+  const se = map.latLngToContainerPoint(b.getSouthEast());
+  const x0 = Math.max(0, Math.floor(Math.min(nw.x, se.x)));
+  const y0 = Math.max(0, Math.floor(Math.min(nw.y, se.y)));
+  const x1 = Math.min(size.x, Math.ceil(Math.max(nw.x, se.x)));
+  const y1 = Math.min(size.y, Math.ceil(Math.max(nw.y, se.y)));
+  if (x1 - x0 < 8 || y1 - y0 < 8) {
+    throw new Error("Выделенная область вне видимой части карты — переместите карту к области");
+  }
+  return { x: x0, y: y0, w: x1 - x0, h: y1 - y0 };
+}
+
+function canvasToJpeg(canvas) {
+  return new Promise((resolve, reject) => {
+    try {
+      canvas.toBlob((b) => (b ? resolve(b) : reject(new Error("Не удалось снять кадр карты"))), "image/jpeg", 0.92);
+    } catch (err) {
+      reject(
+        isSecurityError(err)
+          ? new Error("Браузер запретил снимок карты (SecurityError). Обновите страницу с очисткой кэша (Ctrl+F5).")
+          : err,
+      );
+    }
+  });
+}
+
+/**
+ * Snapshot of the basemap under the AOI (or the whole view without an AOI).
+ * Returns the JPEG and the geographic bounds that exactly match its pixels.
+ */
 export async function captureMapJpeg() {
   return withTimeout(
     (async () => {
       if (!map) throw new Error("Карта ещё не готова");
       const size = map.getSize();
       if (!size.x || !size.y) throw new Error("Пустой кадр карты");
+      const rect = captureRect();
       const canvas = document.createElement("canvas");
-      canvas.width = Math.max(1, size.x);
-      canvas.height = Math.max(1, size.y);
+      canvas.width = rect.w;
+      canvas.height = rect.h;
       const ctx = canvas.getContext("2d");
       ctx.fillStyle = "#111";
       ctx.fillRect(0, 0, canvas.width, canvas.height);
-      const pane = map.getPane("tilePane");
       const mapPos = map.getContainer().getBoundingClientRect();
-      const imgs = [...pane.querySelectorAll("img")];
-      const painted = await Promise.all(imgs.map((img) => paintTile(ctx, img, mapPos).catch(() => false)));
+      const origin = { left: mapPos.left + rect.x, top: mapPos.top + rect.y };
+      const box = { left: origin.left, top: origin.top, right: origin.left + rect.w, bottom: origin.top + rect.h };
+      const imgs = [...map.getPane("tilePane").querySelectorAll("img")];
+      const painted = await Promise.all(imgs.map((img) => paintTile(ctx, img, origin, box).catch(() => false)));
       if (!painted.some(Boolean)) {
-        throw new Error("Не удалось прочитать тайлы карты. Подложка с другого сайта недоступна для снимка.");
+        throw new Error("Не удалось получить тайлы подложки для снимка. Дождитесь загрузки карты или смените подложку.");
       }
-      const blob = await new Promise((resolve, reject) => {
-        try {
-          canvas.toBlob((b) => (b ? resolve(b) : reject(new Error("Не удалось снять кадр карты"))), "image/jpeg", 0.92);
-        } catch (err) {
-          const insecure = err && (err.name === "SecurityError" || /insecure/i.test(String(err.message || "")));
-          reject(
-            insecure
-              ? new Error("Браузер запретил снимок карты: тайл подложки с другого сайта. Подключите dzz.by или откройте сайт по HTTPS.")
-              : err,
-          );
-        }
-      });
-      return new File([blob], `map_aoi_${Date.now()}.jpg`, { type: "image/jpeg" });
+      const blob = await canvasToJpeg(canvas);
+      const nw = map.containerPointToLatLng([rect.x, rect.y]);
+      const se = map.containerPointToLatLng([rect.x + rect.w, rect.y + rect.h]);
+      return {
+        file: new File([blob], `map_aoi_${Date.now()}.jpg`, { type: "image/jpeg" }),
+        geoBounds: { west: nw.lng, south: se.lat, east: se.lng, north: nw.lat },
+      };
     })(),
-    15000,
-    "Захват карты превысил 15 секунд",
+    20000,
+    "Захват карты превысил 20 секунд",
   );
 }
 

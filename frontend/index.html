@@ -548,7 +548,10 @@
                         <button type="button" class="map-seg-btn map-seg-btn-secondary" id="btn-segment-segformer">SegFormer</button>
                     </div>
                     <div class="map-seg-hint" id="map-seg-status">Выделите область на карте или сегментируйте весь кадр</div>
-                    <div class="map-seg-progress" id="map-seg-progress" style="display:none;"><div id="map-seg-progress-bar"></div></div>
+                    <div class="map-seg-progress" id="map-seg-progress" role="progressbar" aria-label="Ход сегментации" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" hidden>
+                        <div class="map-seg-progress-track"><div class="map-seg-progress-bar" id="map-seg-progress-bar"></div></div>
+                        <span class="map-seg-progress-pct" id="map-seg-progress-pct">0%</span>
+                    </div>
                     </div>
                     </div>
                     </div>

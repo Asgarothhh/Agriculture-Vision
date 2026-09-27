@@ -133,11 +133,17 @@ export function initials(first, last) {
   return `${(first || "A")[0]}${(last || "V")[0]}`.toUpperCase();
 }
 
+/** Tainted-canvas / blocked-storage errors: Firefox says "The operation is insecure." */
+export function isSecurityError(err) {
+  return !!err && (err.name === "SecurityError" || /insecure|tainted/i.test(String(err.message || "")));
+}
+
 export function withTimeout(promise, ms, message) {
+  let timer;
   return Promise.race([
     promise,
     new Promise((_, reject) => {
-      setTimeout(() => reject(new Error(message)), ms);
+      timer = setTimeout(() => reject(new Error(message)), ms);
     }),
-  ]);
+  ]).finally(() => clearTimeout(timer));
 }

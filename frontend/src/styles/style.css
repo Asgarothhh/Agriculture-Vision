@@ -862,19 +862,42 @@ span.color-box { display: inline-block; border: 1.5px solid #e2e8f0; }
 }
 .map-seg-progress {
     margin-top: 8px;
-    height: 6px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+.map-seg-progress[hidden] { display: none; }
+.map-seg-progress-track {
+    flex: 1;
+    height: 8px;
     border-radius: 999px;
     background: #e2e8f0;
     overflow: hidden;
 }
-.map-seg-progress div {
+.map-seg-progress-bar {
     height: 100%;
     width: 0%;
+    border-radius: 999px;
     background: var(--accent-red);
-    transition: width 0.2s ease;
+    background-image: linear-gradient(45deg, rgba(255,255,255,0.25) 25%, transparent 25%, transparent 50%, rgba(255,255,255,0.25) 50%, rgba(255,255,255,0.25) 75%, transparent 75%);
+    background-size: 16px 16px;
+    animation: map-seg-stripes 0.8s linear infinite;
+    transition: width 0.3s ease;
 }
-.map-seg-progress[style*="block"] {
-    display: block;
+.map-seg-progress-pct {
+    min-width: 34px;
+    text-align: right;
+    font-size: 12px;
+    font-weight: 600;
+    color: #334155;
+    font-variant-numeric: tabular-nums;
+}
+.map-seg-progress.error .map-seg-progress-bar { background-color: #b91c1c; animation: none; }
+.map-seg-progress.error .map-seg-progress-pct { color: #b91c1c; }
+.map-seg-btn:disabled { opacity: 0.55; cursor: not-allowed; }
+@keyframes map-seg-stripes { to { background-position: 16px 0; } }
+@media (prefers-reduced-motion: reduce) {
+    .map-seg-progress-bar { animation: none; }
 }
 
 .menu-icon-svg { flex-shrink: 0; }
