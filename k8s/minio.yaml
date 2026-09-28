@@ -34,7 +34,7 @@ spec:
     spec:
       containers:
         - name: minio
-          image: minio/minio:latest
+          image: bitnami/minio:latest
           # quay.io now answers "unauthorized" to anonymous pulls of this image; the node
           # already has it cached, and ":latest" would otherwise force a pull (Always).
           imagePullPolicy: IfNotPresent
