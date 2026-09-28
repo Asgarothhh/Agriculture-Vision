@@ -23,12 +23,48 @@ export function taskStage(task) {
     return { percent: TASK_FROM, text: "В очереди на обработку…" };
   }
   if (task?.status === "PROCESSING") {
+    const done = Number(task?.info?.windows_done) || 0;
+    const total = Number(task?.info?.windows_total) || 0;
     return {
       percent: TASK_FROM + Math.round((progress * (TASK_TO - TASK_FROM)) / 100),
-      text: `Сегментация на сервере… ${progress}%`,
+      text:
+        total > 1 && done > 0
+          ? `Сегментация на сервере: окно ${Math.min(done, total)} из ${total}`
+          : `Сегментация на сервере… ${progress}%`,
     };
   }
   return { percent: TASK_TO, text: "Обработка на сервере завершена" };
+}
+
+function formatMpp(value) {
+  return Number(value).toFixed(2).replace(".", ",");
+}
+
+/**
+ * The models are trained at ~0.1 m/px. When the server had to process a large area at a
+ * noticeably coarser scale (window budget on CPU), tell the user how to get sharper edges.
+ */
+export function scaleHint(info) {
+  const work = Number(info?.work_m_per_px);
+  const target = Number(info?.target_m_per_px) || 0.1;
+  if (!work || work <= target * 1.5) return "";
+  const size = Array.isArray(info?.work_size) ? Math.max(...info.work_size.map(Number)) : 0;
+  // Area that fits the same window budget at ~1.5× the training scale.
+  const sideM = size ? size * target * 1.5 : 0;
+  const ha = sideM ? Math.max(1, Math.round((sideM * sideM) / 10000)) : 0;
+  return (
+    `Большая область: обработано в масштабе ${formatMpp(work)} м/пикс (модель обучена на ${formatMpp(target)}).` +
+    (ha ? ` Для точных границ выделите поле поменьше — до ~${ha} га.` : " Для точных границ выделите поле поменьше.")
+  );
+}
+
+/** Rough ground size of the segmentation area (km on its longer side). */
+export function areaSideKm(bounds) {
+  if (!bounds) return 0;
+  const lat = ((bounds.north + bounds.south) / 2) * (Math.PI / 180);
+  const w = Math.abs(bounds.east - bounds.west) * 111.32 * Math.cos(lat);
+  const h = Math.abs(bounds.north - bounds.south) * 111.32;
+  return Math.max(w, h);
 }
 
 /**

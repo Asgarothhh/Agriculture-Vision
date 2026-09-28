@@ -207,21 +207,119 @@ def parse_yolo_results(
     return polygons, points
 
 
+M_PER_DEG_LAT = 111_320.0
+GEOGRAPHIC_CRS = {"EPSG:4326", "OGC:CRS84", "CRS:84", "WGS84"}
+
+
+def pixel_size_m(transform: list[float] | None, crs: str | None, height: int | None) -> float | None:
+    """Ground size of one pixel (metres) from a GDAL transform; None if unknown."""
+    if not transform or len(transform) < 6:
+        return None
+    west, pw, _rx, north, _ry, ph = (float(v) for v in transform[:6])
+    if not pw or not ph:
+        return None
+    if not crs or str(crs).upper() in GEOGRAPHIC_CRS:
+        lat = north + ph * (height or 0) / 2.0
+        mx = abs(pw) * M_PER_DEG_LAT * float(np.cos(np.radians(lat)))
+        my = abs(ph) * M_PER_DEG_LAT
+        value = (mx + my) / 2.0
+    else:
+        value = (abs(pw) + abs(ph)) / 2.0  # projected CRS: metres
+    return value if 1e-4 < value < 1e4 else None
+
+
+def count_windows(height: int, width: int, tile: int, stride: int) -> int:
+    """Sliding windows needed to cover height×width (same rule as segmentation_service)."""
+
+    def starts(size: int) -> int:
+        if size <= tile:
+            return 1
+        return len(range(0, size - tile + 1, max(1, stride))) + (0 if (size - tile) % max(1, stride) == 0 else 1)
+
+    return starts(height) * starts(width)
+
+
+def choose_working_scale(
+    height: int,
+    width: int,
+    src_m_per_px: float | None,
+    *,
+    target_m_per_px: float,
+    tile: int,
+    stride: int,
+    max_windows: int,
+    max_upscale: float = 2.0,
+) -> tuple[float | None, int, int, int]:
+    """Working ground resolution for a snapshot: as close to the training scale as the
+    window budget allows. Returns (work_m_per_px, work_h, work_w, windows).
+    Without a known source scale the image stays as it is."""
+    if not src_m_per_px or src_m_per_px <= 0:
+        return None, height, width, count_windows(height, width, tile, stride)
+    work = max(target_m_per_px, src_m_per_px / max_upscale)
+    for _ in range(200):
+        factor = src_m_per_px / work
+        wh = max(1, int(round(height * factor)))
+        ww = max(1, int(round(width * factor)))
+        windows = count_windows(wh, ww, tile, stride)
+        if windows <= max(1, max_windows):
+            return work, wh, ww, windows
+        work *= 1.08
+    return work, wh, ww, windows
+
+
+def resize_to(image: np.ndarray, height: int, width: int) -> np.ndarray:
+    import cv2
+
+    h, w = image.shape[:2]
+    if (h, w) == (height, width):
+        return image
+    interp = cv2.INTER_CUBIC if height * width > h * w else cv2.INTER_AREA
+    return cv2.resize(image, (width, height), interpolation=interp)
+
+
+def scale_features(features: list[dict[str, Any]], sx: float, sy: float) -> list[dict[str, Any]]:
+    """Maps features from working pixels back to source pixels."""
+    if sx == 1.0 and sy == 1.0:
+        return features
+    out = []
+    for item in features:
+        geom = item["geometry"]
+        if geom["type"] == "Point":
+            x, y = geom["coordinates"]
+            coords: Any = [x * sx, y * sy]
+        else:
+            coords = [[[x * sx, y * sy] for x, y in ring] for ring in geom["coordinates"]]
+        scaled = {**item, "geometry": {"type": geom["type"], "coordinates": coords}}
+        k = (sx + sy) / 2.0
+        if item.get("radius_approx") is not None:
+            scaled["radius_approx"] = item["radius_approx"] * k
+        if item.get("area_approx") is not None:
+            scaled["area_approx"] = item["area_approx"] * sx * sy
+        out.append(scaled)
+    return out
+
+
 def segformer_polygons(items: Any, confidence: float, sx: float = 1.0, sy: float = 1.0) -> list[dict[str, Any]]:
-    """Convert segmentation_service PolygonItem.polygon_px outlines to inference features."""
+    """Convert segmentation_service PolygonItem outlines (with holes) to inference features."""
     polygons: list[dict[str, Any]] = []
+
+    def closed(points: Any) -> list[list[float]]:
+        ring = [[float(x) * sx, float(y) * sy] for x, y in points]
+        if ring and ring[0] != ring[-1]:
+            ring.append(ring[0])
+        return ring
+
     for item in items or []:
         coords = getattr(item, "polygon_px", None) or []
         if len(coords) < 3 or getattr(item, "valid", True) is False:
             continue
-        ring = [[float(x) * sx, float(y) * sy] for x, y in coords]
-        if ring[0] != ring[-1]:
-            ring.append(ring[0])
+        rings = [closed(coords)]
+        rings += [closed(hole) for hole in (getattr(item, "holes_px", None) or []) if len(hole) >= 3]
         polygons.append(
             {
                 "class_id": FIELD_CLASS_ID,
                 "confidence": confidence,
-                "geometry": {"type": "Polygon", "coordinates": [ring]},
+                "geometry": {"type": "Polygon", "coordinates": rings},
             }
         )
     return polygons
@@ -333,38 +431,79 @@ class ModelRuntime:
         status = "ready" if any(self._loaded.values()) else "unavailable"
         return {"status": status, "models": models}
 
-    def infer(self, file_bytes: bytes, filename: str, request: InferenceRequest) -> InferenceResponse:
+    def infer(
+        self, file_bytes: bytes, filename: str, request: InferenceRequest, on_progress=None
+    ) -> InferenceResponse:
         image = _decode_image(file_bytes)
         if request.model == "yolo_seg_26":
-            payload = self._run_yolo(image, request.confidence)
+            payload = self._run_yolo(image, request.confidence, request.m_per_px, on_progress)
         elif request.model == "segformer":
-            payload = self._run_segformer(image, request.confidence)
+            payload = self._run_segformer(image, request.confidence, request.m_per_px, on_progress)
         else:
             raise ValueError(f"Unknown model {request.model}")
         return InferenceResponse(
             model=payload["model"],
             polygons=[InferenceFeature(**item) for item in payload.get("polygons", [])],
             points=[InferenceFeature(**item) for item in payload.get("points", [])],
+            info=payload.get("info", {}),
         )
 
-    def _run_yolo(self, image: np.ndarray, confidence: float) -> dict[str, Any]:
+    def _run_yolo(
+        self, image: np.ndarray, confidence: float, m_per_px: float | None = None, on_progress=None
+    ) -> dict[str, Any]:
         if self._yolo is None:
             raise RuntimeError("YOLO weights are not loaded")
         import cv2
 
-        # _decode_image yields RGB; Ultralytics treats numpy input as BGR.
-        bgr = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
+        settings = get_settings()
         names = getattr(self._yolo, "names", None) or {}
         tile = yolo_train_size(self._yolo)
+        src_h, src_w = image.shape[:2]
+        stride = max(1, int(round(tile * (1.0 - YOLO_SLICE_OVERLAP))))
+        work_m, work_h, work_w, windows_planned = choose_working_scale(
+            src_h,
+            src_w,
+            m_per_px,
+            target_m_per_px=settings.yolo_target_m_per_px,
+            tile=tile,
+            stride=stride,
+            max_windows=settings.yolo_max_windows,
+        )
+        # _decode_image yields RGB; Ultralytics treats numpy input as BGR.
+        bgr = cv2.cvtColor(resize_to(image, work_h, work_w), cv2.COLOR_RGB2BGR)
         height, width = bgr.shape[:2]
+        sx, sy = src_w / width, src_h / height
+        info = {
+            "src_m_per_px": m_per_px,
+            "work_m_per_px": work_m,
+            "target_m_per_px": settings.yolo_target_m_per_px,
+            "work_size": [width, height],
+            "windows": 1,
+        }
         if max(height, width) <= tile * YOLO_SLICE_MIN_FACTOR:
             # Small snapshot: one pass, as before.
             results = self._yolo.predict(bgr, conf=confidence, verbose=False)
             polygons, points = parse_yolo_results(results, names)
-            return {"model": "yolo_seg_26", "polygons": polygons, "points": points}
+            if on_progress:
+                on_progress(1, 1)
+            return {
+                "model": "yolo_seg_26",
+                "polygons": scale_features(polygons, sx, sy),
+                "points": scale_features(points, sx, sy),
+                "info": info,
+            }
 
         windows = tile_windows(height, width, tile)
-        logger.info("YOLO sliced inference: %sx%s px → %s tiles of %s px", width, height, len(windows), tile)
+        info["windows"] = len(windows)
+        logger.info(
+            "YOLO sliced inference: %sx%s px (%.3f m/px, source %s) → %s tiles of %s px",
+            width,
+            height,
+            work_m or 0.0,
+            m_per_px,
+            len(windows),
+            tile,
+        )
         polygons: list[dict[str, Any]] = []
         points: list[dict[str, Any]] = []
         for start_idx in range(0, len(windows), YOLO_SLICE_BATCH):
@@ -375,10 +514,19 @@ class ModelRuntime:
                 tile_polys, tile_points = parse_yolo_results([result], names, dx=x0, dy=y0)
                 polygons.extend(tile_polys)
                 points.extend(tile_points)
+            if on_progress:
+                on_progress(min(len(windows), start_idx + len(batch)), len(windows))
         polygons, points = merge_sliced_detections(polygons, points)
-        return {"model": "yolo_seg_26", "polygons": polygons, "points": points}
+        return {
+            "model": "yolo_seg_26",
+            "polygons": scale_features(polygons, sx, sy),
+            "points": scale_features(points, sx, sy),
+            "info": info,
+        }
 
-    def _run_segformer(self, image: np.ndarray, confidence: float) -> dict[str, Any]:
+    def _run_segformer(
+        self, image: np.ndarray, confidence: float, m_per_px: float | None = None, on_progress=None
+    ) -> dict[str, Any]:
         if self._segformer is None:
             raise RuntimeError("SegFormer weights are not loaded")
         import cv2
@@ -390,10 +538,36 @@ class ModelRuntime:
             from app.segmentation_service.pipeline import run_segmentation
             from app.segmentation_service.schemas import SegmentRequest
 
-        request = SegmentRequest(threshold=confidence, include_mask_png=True)
-        result = run_segmentation(self._segformer, rgb=image, request=request)
-        # The pipeline downsizes frames larger than max_side_px; map back to source pixels.
+        settings = get_settings()
+        seg_settings = getattr(self._segformer, "settings", None)
+        meta = getattr(self._segformer, "meta", None) or {}
+        tile = int(meta.get("tile_size", getattr(seg_settings, "tile_size", 512)) or 512)
+        stride = int(getattr(seg_settings, "sliding_stride", 0) or max(1, int(tile * 0.75)))
         src_h, src_w = image.shape[:2]
+        work_m, work_h, work_w, windows = choose_working_scale(
+            src_h,
+            src_w,
+            m_per_px,
+            target_m_per_px=settings.seg_target_m_per_px,
+            tile=tile,
+            stride=stride,
+            max_windows=settings.seg_max_windows,
+        )
+        work = resize_to(image, work_h, work_w)
+        logger.info(
+            "SegFormer: %sx%s px (source %s m/px) → %sx%s px at %.3f m/px, %s windows of %s",
+            src_w,
+            src_h,
+            m_per_px,
+            work_w,
+            work_h,
+            work_m or 0.0,
+            windows,
+            tile,
+        )
+        request = SegmentRequest(threshold=confidence, include_mask_png=True)
+        result = run_segmentation(self._segformer, rgb=work, request=request, on_progress=on_progress)
+        # Working image (and anything the pipeline shrank further) → source pixels.
         out_h, out_w = result.image_hw
         sx = src_w / out_w if out_w else 1.0
         sy = src_h / out_h if out_h else 1.0
@@ -407,7 +581,14 @@ class ModelRuntime:
                 if mask.shape[:2] != (src_h, src_w):
                     mask = cv2.resize(mask, (src_w, src_h), interpolation=cv2.INTER_NEAREST)
                 polygons.extend(_mask_to_polygons(mask, FIELD_CLASS_ID, confidence))
-        return {"model": "segformer", "polygons": polygons, "points": []}
+        info = {
+            "src_m_per_px": m_per_px,
+            "work_m_per_px": work_m,
+            "target_m_per_px": settings.seg_target_m_per_px,
+            "work_size": [work_w, work_h],
+            "windows": windows,
+        }
+        return {"model": "segformer", "polygons": polygons, "points": [], "info": info}
 
 
 def _decode_image(data: bytes) -> np.ndarray:
@@ -461,9 +642,9 @@ def health() -> dict[str, Any]:
     return runtime.health()
 
 
-def infer(file_bytes: bytes, filename: str, request: InferenceRequest) -> InferenceResponse:
-    return runtime.infer(file_bytes, filename, request)
+def infer(file_bytes: bytes, filename: str, request: InferenceRequest, on_progress=None) -> InferenceResponse:
+    return runtime.infer(file_bytes, filename, request, on_progress=on_progress)
 
 
-def infer_sync(file_bytes: bytes, filename: str, request: InferenceRequest) -> InferenceResponse:
-    return infer(file_bytes, filename, request)
+def infer_sync(file_bytes: bytes, filename: str, request: InferenceRequest, on_progress=None) -> InferenceResponse:
+    return infer(file_bytes, filename, request, on_progress=on_progress)

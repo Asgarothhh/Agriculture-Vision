@@ -129,14 +129,30 @@ def mask_to_polygons(
     close_px: int = 0,
     blur_px: int = 0,
     smooth_px: float = 0.0,
+    keep_holes: bool = False,
 ) -> list[dict[str, Any]]:
-    """Все значимые контуры на маске (например, границы отдельных полей)."""
+    """Все значимые контуры на маске (например, границы отдельных полей).
+
+    keep_holes: внутренние кольца (лес, болото внутри поля) площадью не меньше
+    min_area_px остаются дырами полигона ("holes_px"), а не заливаются полем.
+    """
     binary = smooth_binary_mask(
         mask, open_px=open_px, close_px=close_px, blur_px=blur_px
     )
-    contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    mode = cv2.RETR_CCOMP if keep_holes else cv2.RETR_EXTERNAL
+    contours, hierarchy = cv2.findContours(binary, mode, cv2.CHAIN_APPROX_SIMPLE)
+    holes_of: dict[int, list[np.ndarray]] = {}
+    outer_idx = list(range(len(contours)))
+    if keep_holes and hierarchy is not None:
+        tree = hierarchy[0]
+        outer_idx = [i for i in range(len(contours)) if tree[i][3] < 0]
+        for i in range(len(contours)):
+            parent = tree[i][3]
+            if parent >= 0:
+                holes_of.setdefault(parent, []).append(contours[i])
     result: list[dict[str, Any]] = []
-    for cnt in sorted(contours, key=cv2.contourArea, reverse=True):
+    for idx in sorted(outer_idx, key=lambda i: cv2.contourArea(contours[i]), reverse=True):
+        cnt = contours[idx]
         area = float(cv2.contourArea(cnt))
         if area < min_area_px:
             continue
@@ -144,9 +160,17 @@ def mask_to_polygons(
         ring = [(int(p[0][0]), int(p[0][1])) for p in approx]
         if len(ring) < 3:
             continue
-        poly = _largest_polygon(make_valid(Polygon(ring)))
+        hole_rings = []
+        for hole in holes_of.get(idx, []):
+            if float(cv2.contourArea(hole)) < min_area_px:
+                continue
+            h_approx = cv2.approxPolyDP(hole, max(simplify_tolerance, 0.5), closed=True)
+            h_ring = [(int(p[0][0]), int(p[0][1])) for p in h_approx]
+            if len(h_ring) >= 3:
+                hole_rings.append(h_ring)
+        poly = _largest_polygon(make_valid(Polygon(ring, hole_rings)))
         if poly is None:
-            poly = _largest_polygon(make_valid(Polygon(ring).buffer(0)))
+            poly = _largest_polygon(make_valid(Polygon(ring, hole_rings).buffer(0)))
         if poly is None:
             continue
         poly = _smooth_polygon(poly, smooth_px)
@@ -161,12 +185,17 @@ def mask_to_polygons(
         coords = list(poly.exterior.coords)[:-1]
         if len(coords) < 3:
             continue
-        result.append(
-            {
-                "polygon_px": [(int(round(x)), int(round(y))) for x, y in coords],
-                "area_px": float(poly.area),
-            }
-        )
+        item: dict[str, Any] = {
+            "polygon_px": [(int(round(x)), int(round(y))) for x, y in coords],
+            "area_px": float(poly.area),
+        }
+        if keep_holes:
+            item["holes_px"] = [
+                [(int(round(x)), int(round(y))) for x, y in list(ring.coords)[:-1]]
+                for ring in poly.interiors
+                if len(ring.coords) >= 4 and Polygon(ring).area >= min_area_px
+            ]
+        result.append(item)
         if len(result) >= max_polygons:
             break
     return result
@@ -186,6 +215,7 @@ def mask_to_field_polygons(
     close_px: int = 0,
     blur_px: int = 0,
     smooth_px: float = 0.0,
+    keep_holes: bool = False,
 ) -> list[dict[str, Any]]:
     """Границы отдельных полей: маска пашни делится на участки, затем контуры."""
     binary = smooth_binary_mask(
@@ -198,6 +228,7 @@ def mask_to_field_polygons(
             min_area_px=min_area_px,
             max_polygons=max_polygons,
             smooth_px=smooth_px,
+            keep_holes=keep_holes,
         )
 
     from ml_core.parcels import parcel_masks, split_field_mask
@@ -217,6 +248,7 @@ def mask_to_field_polygons(
             min_area_px=min_area_px,
             max_polygons=1,
             smooth_px=smooth_px,
+            keep_holes=keep_holes,
         )
         result.extend(polys)
         if len(result) >= max_polygons:

@@ -13,6 +13,8 @@ class InferenceRequest(BaseModel):
     width: int | None = None
     height: int | None = None
     transform: list[float] | None = None
+    # Ground size of one snapshot pixel (metres); None = unknown (no georeference).
+    m_per_px: float | None = Field(default=None, gt=0)
 
 
 class InferenceFeature(BaseModel):
@@ -28,3 +30,5 @@ class InferenceResponse(BaseModel):
     model: str
     polygons: list[InferenceFeature] = Field(default_factory=list)
     points: list[InferenceFeature] = Field(default_factory=list)
+    # How the snapshot was processed: source/working m/px, working size, window count.
+    info: dict[str, Any] = Field(default_factory=dict)

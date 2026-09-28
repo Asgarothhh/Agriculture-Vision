@@ -62,6 +62,8 @@ class ModelSettings:
     field_simplify_px: float = 6.0
     field_min_area_px: float = 4000.0
     field_max_polygons: int = 200
+    # дыры внутри поля (лес, болото) остаются дырами полигона, а не заливаются
+    field_keep_holes: bool = True
     # деление сплошной пашни на отдельные участки по межам/дорогам на снимке
     split_parcels: bool = True
     parcel_ridge_quantile: float = 0.80

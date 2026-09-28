@@ -22,6 +22,8 @@ class PolygonPayload(BaseModel):
 
 class PolygonItem(BaseModel):
     polygon_px: list[tuple[int, int]]
+    # внутренние кольца (дыры) в пикселях того же кадра; пусто — дыр нет
+    holes_px: list[list[tuple[int, int]]] = []
     area_px: float
     valid: bool = True
     label: str = "field"

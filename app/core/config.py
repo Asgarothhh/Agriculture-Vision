@@ -39,6 +39,13 @@ class Settings(BaseSettings):
     # Models load in worker_process_init; Celery SIGKILLs a pool child that has not
     # reported UP within this many seconds (its own default is 4 s).
     ml_worker_boot_timeout: float = 600.0
+    # Scale-matched inference: the models are trained at ~0.1 m/px (docs/DATASET.md).
+    # A snapshot is resampled to this ground resolution before sliding windows; for large
+    # areas the scale gets coarser so that at most *_max_windows windows run (CPU budget).
+    seg_target_m_per_px: float = 0.1
+    seg_max_windows: int = 49
+    yolo_target_m_per_px: float = 0.1
+    yolo_max_windows: int = 36
 
     s3_endpoint: str = "http://localhost:9000"
     s3_bucket: str = "agrovision"

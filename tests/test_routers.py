@@ -388,7 +388,7 @@ def test_dzz_routes_do_not_crash(client, auth_headers):
 def test_tasks_calls_runtime(client, auth_headers, monkeypatch):
     called = {"infer": 0, "upload": 0}
 
-    def fake_infer(file_bytes, filename, request):
+    def fake_infer(file_bytes, filename, request, **_kwargs):
         called["infer"] += 1
         return empty_inference()
 

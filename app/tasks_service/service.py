@@ -195,6 +195,7 @@ def task_to_dict(task: ProcessingTask) -> dict[str, Any]:
         "completed_at": task.completed_at,
         "confidence_threshold": task.confidence_threshold,
         "image_id": task.image.id if task.image else None,
+        "info": task.info,
     }
 
 

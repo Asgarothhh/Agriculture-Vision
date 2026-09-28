@@ -32,6 +32,8 @@ serving:
   field_simplify_px: 6.0
   field_min_area_px: 4000.0
   field_max_polygons: 200
+  # лес / болото внутри поля остаются дырой полигона
+  field_keep_holes: true
   # деление сплошной пашни на отдельные поля по межам/дорогам на снимке
   split_parcels: true
   # меньше значение — дробит на больше участков

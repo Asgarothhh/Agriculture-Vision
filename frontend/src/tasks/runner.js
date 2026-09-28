@@ -3,10 +3,22 @@ import { $, confirmModal, showToast, withTimeout } from "../ui.js";
 import { captureMapJpeg, clearAoi, getAoiGeoJson, getViewBounds } from "../map/map.js";
 import { loadMapData, selectedClassIds } from "../layers/store.js";
 import { clearUndo } from "../map/undo.js";
-import { SEG_STAGES, clampPercent, humanizeSegError, mlPillState, mlPillTitle, taskStage } from "./progress.js";
+import {
+  SEG_STAGES,
+  areaSideKm,
+  clampPercent,
+  humanizeSegError,
+  mlPillState,
+  mlPillTitle,
+  scaleHint,
+  taskStage,
+} from "./progress.js";
 import { refreshAccountStats } from "../account/profile.js";
 
 const HEALTH_TIMEOUT_MS = 10000;
+// The server processes large areas window by window on CPU: allow up to 10 minutes.
+const TASK_TIMEOUT_MS = 600000;
+const LARGE_AREA_KM = 2;
 
 let uploadFile = null;
 
@@ -91,6 +103,7 @@ export async function runTask({ file, geoBounds, aoi, architecture, onStage }) {
   if (!taskId) throw new Error("Сервер не вернул идентификатор задачи обработки");
   onStage?.(taskStage(created));
   const task = await tasksApi.pollTask(taskId, {
+    timeoutMs: TASK_TIMEOUT_MS,
     onProgress: (item) => onStage?.(taskStage(item)),
   });
   if (task.status === "FAILED") {
@@ -157,14 +170,18 @@ export async function runSegmentation(architecture) {
     }
     segStage(SEG_STAGES.capture);
     const { file, geoBounds } = await captureMapJpeg();
+    if (areaSideKm(geoBounds) > LARGE_AREA_KM) {
+      showToast("Большая область: обработка займёт больше времени, а границы будут менее точными");
+    }
     segStage(SEG_STAGES.upload);
-    const { created } = await runTask({ file, geoBounds, aoi: getAoiGeoJson(), architecture, onStage: segStage });
+    const { created, task } = await runTask({ file, geoBounds, aoi: getAoiGeoJson(), architecture, onStage: segStage });
     segProgress(SEG_STAGES.done.percent);
+    const hint = scaleHint(task?.info);
     const message = created
       ? `Сегментация завершена: добавлено объектов — ${created}`
       : "Сегментация завершена: объекты не найдены";
-    segStatus(message);
-    showToast(message);
+    segStatus(hint ? `${message}. ${hint}` : message);
+    showToast(hint ? `${message}. ${hint}` : message);
     clearAoi();
   } catch (err) {
     failed = true;

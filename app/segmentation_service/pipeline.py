@@ -98,8 +98,12 @@ def run_segmentation(
     rgb: np.ndarray | None = None,
     nir: np.ndarray | None = None,
     request: SegmentRequest | None = None,
+    on_progress=None,
 ) -> SegmentResponse:
-    """Сегментация одного кадра (файлы или массивы uint8)."""
+    """Сегментация одного кадра (файлы или массивы uint8).
+
+    on_progress(done, total) — необязательный колбэк скользящего окна (прогресс задачи).
+    """
     if not runtime.is_loaded:
         runtime.load()
 
@@ -148,6 +152,7 @@ def run_segmentation(
             stride=settings.sliding_stride,
             tta=settings.sliding_tta if req.tta is None else tta,
             fp16=fp16,
+            on_progress=on_progress,
         )
     else:
         rgb_infer, image_4ch, _, letterbox_meta = _prepare_4ch(
@@ -204,10 +209,12 @@ def run_segmentation(
         close_px=settings.field_mask_close_px,
         blur_px=settings.field_mask_blur_px,
         smooth_px=settings.field_smooth_px,
+        keep_holes=getattr(settings, "field_keep_holes", False),
     )
     polygons = [
         PolygonItem(
             polygon_px=[tuple(p) for p in item["polygon_px"]],
+            holes_px=[[tuple(p) for p in hole] for hole in item.get("holes_px", [])],
             area_px=float(item["area_px"]),
             valid=len(item["polygon_px"]) >= 3,
             label="field",

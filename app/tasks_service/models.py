@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING, Optional
 
 from geoalchemy2 import Geometry
 from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, String, Text, func
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.database import Base
@@ -32,6 +32,8 @@ class ProcessingTask(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # How the snapshot was processed (migration 003_task_info): source / working m/px, windows.
+    info: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
 
     user: Mapped[User] = relationship(back_populates="tasks")
     image: Mapped[Optional[Image]] = relationship(

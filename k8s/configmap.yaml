@@ -19,6 +19,12 @@ data:
   S3_ACCESS_KEY: "minioadmin"
   S3_SECRET_KEY: "minioadmin"
   ML_WORKER_BOOT_TIMEOUT: "600"
+  # Scale-matched inference (models trained at 0.1 m/px). On CPU each window costs
+  # seconds: lower *_MAX_WINDOWS if a whole field takes too long, raise it with a GPU.
+  SEG_TARGET_M_PER_PX: "0.1"
+  SEG_MAX_WINDOWS: "49"
+  YOLO_TARGET_M_PER_PX: "0.1"
+  YOLO_MAX_WINDOWS: "36"
   CORS_ORIGINS: "http://localhost,http://localhost:80,http://localhost:30080,http://127.0.0.1,http://127.0.0.1:80,http://127.0.0.1:30080,http://192.168.0.118"
   YOLO_WEIGHTS_PATH: "/app/config/yolo_best.pt"
   SEGFORMER_WEIGHTS_PATH: "/app/config/segformer_best.pt"

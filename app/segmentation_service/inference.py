@@ -84,8 +84,12 @@ def predict_prob_sliding(
     stride: int = 256,
     tta: bool = False,
     fp16: bool = False,
+    on_progress=None,
 ) -> np.ndarray:
-    """Вероятность поля для большой сцены в нативном разрешении (4ch CHW)."""
+    """Вероятность поля для большой сцены в нативном разрешении (4ch CHW).
+
+    on_progress(done, total) вызывается после каждого окна (прогресс задачи).
+    """
     _, h, w = image_4ch.shape
     if h <= tile and w <= tile:
         return predict_prob(model, image_4ch, device, tta=tta, fp16=fp16)
@@ -93,8 +97,12 @@ def predict_prob_sliding(
     prob_acc = np.zeros((h, w), dtype=np.float32)
     weight = np.zeros((h, w), dtype=np.float32)
     window = _tile_window(tile)
-    for y0 in _tile_starts(h, tile, stride):
-        for x0 in _tile_starts(w, tile, stride):
+    ys = _tile_starts(h, tile, stride)
+    xs = _tile_starts(w, tile, stride)
+    total = len(ys) * len(xs)
+    done = 0
+    for y0 in ys:
+        for x0 in xs:
             y1, x1 = min(y0 + tile, h), min(x0 + tile, w)
             ph, pw = y1 - y0, x1 - x0
             patch = np.zeros((4, tile, tile), dtype=np.float32)
@@ -103,6 +111,12 @@ def predict_prob_sliding(
             wgt = window[:ph, :pw]
             prob_acc[y0:y1, x0:x1] += p * wgt
             weight[y0:y1, x0:x1] += wgt
+            done += 1
+            if on_progress is not None:
+                try:
+                    on_progress(done, total)
+                except Exception:
+                    pass
     return prob_acc / np.maximum(weight, 1e-6)
 
 

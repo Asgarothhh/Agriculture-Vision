@@ -12,7 +12,7 @@ from app.core.celery_app import celery_app
 from app.core.config import get_settings
 from app.core.database import SyncSessionLocal
 from app.core.storage import download_bytes
-from app.ml_service.runtime import infer_sync, load_models
+from app.ml_service.runtime import infer_sync, load_models, pixel_size_m
 from app.ml_service.postprocess import persist_inference
 from app.ml_service.schemas import InferenceRequest
 from app.tasks_service.models import ProcessingTask
@@ -87,6 +87,8 @@ def run_inference(task_id: str, transform: list[float] | None = None, pixel_spac
 
             aoi = mapping(to_shape(task.aoi))
 
+        # Ground size of a snapshot pixel: lets the model run at its training scale.
+        m_per_px = None if pixel_space else pixel_size_m(transform, task.image.crs, task.image.height)
         request = InferenceRequest(
             model=task.model_name,  # type: ignore[arg-type]
             confidence=task.confidence_threshold,
@@ -95,8 +97,19 @@ def run_inference(task_id: str, transform: list[float] | None = None, pixel_spac
             width=task.image.width,
             height=task.image.height,
             transform=transform,
+            m_per_px=m_per_px,
         )
-        response = infer_sync(data, task.image.file_path.split("/")[-1], request)
+
+        def on_progress(done: int, total: int) -> None:
+            # 30 → 70 % while the model walks over the windows (the progress bar moves).
+            value = 30 + int(40 * done / max(1, total))
+            if value > task.progress:
+                task.progress = value
+                task.info = {**(task.info or {}), "windows_done": done, "windows_total": total}
+                session.commit()
+
+        response = infer_sync(data, task.image.file_path.split("/")[-1], request, on_progress=on_progress)
+        task.info = {**(response.info or {}), "windows_done": response.info.get("windows"), "windows_total": response.info.get("windows")}
         task.progress = 70
         session.commit()
 

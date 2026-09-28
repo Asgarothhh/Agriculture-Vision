@@ -78,3 +78,28 @@ describe("mlPillState", () => {
     expect(mlPillTitle(ready)).toBe("segformer: загружена\nyolo_seg_26: weights file not found");
   });
 });
+
+describe("scale-matched segmentation hints", () => {
+  it("shows the window being processed", async () => {
+    const { taskStage } = await import("./progress.js");
+    const stage = taskStage({ status: "PROCESSING", progress: 50, info: { windows_done: 7, windows_total: 49 } });
+    expect(stage.text).toBe("Сегментация на сервере: окно 7 из 49");
+    expect(taskStage({ status: "PROCESSING", progress: 50, info: {} }).text).toContain("50%");
+  });
+
+  it("hints to select a smaller area when the server had to go coarser", async () => {
+    const { scaleHint } = await import("./progress.js");
+    expect(scaleHint({ work_m_per_px: 0.12, target_m_per_px: 0.1 })).toBe("");
+    expect(scaleHint(null)).toBe("");
+    const hint = scaleHint({ work_m_per_px: 0.238, target_m_per_px: 0.1, work_size: [2646, 2646] });
+    expect(hint).toContain("0,24 м/пикс");
+    expect(hint).toContain("до ~16 га");
+  });
+
+  it("measures the area size in km", async () => {
+    const { areaSideKm } = await import("./progress.js");
+    const km = areaSideKm({ west: 27.0, east: 27.03, south: 53.9, north: 53.91 });
+    expect(km).toBeGreaterThan(1.9);
+    expect(km).toBeLessThan(2.1);
+  });
+});

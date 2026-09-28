@@ -194,11 +194,11 @@ def test_run_segmentation_is_called_with_its_real_signature(monkeypatch):
         if isinstance(node, ast.FunctionDef) and node.name == "run_segmentation"
     )
     assert [a.arg for a in func.args.args] == ["runtime"]
-    assert {"rgb", "request"} <= {a.arg for a in func.args.kwonlyargs}
+    assert {"rgb", "request", "on_progress"} <= {a.arg for a in func.args.kwonlyargs}
 
     seen = {}
 
-    def fake_run_segmentation(rt, *, rgb_path=None, nir_path=None, rgb=None, nir=None, request=None):
+    def fake_run_segmentation(rt, *, rgb_path=None, nir_path=None, rgb=None, nir=None, request=None, on_progress=None):
         seen["shape"] = rgb.shape
         seen["threshold"] = request.threshold
         return SegmentResponse(
@@ -395,3 +395,167 @@ def test_run_yolo_slices_large_snapshots():
     assert max(xs) > 1500
     assert all(p["class_id"] == 4 for p in payload["polygons"])
     assert all(p["class_id"] == 26 for p in payload["points"])
+
+
+def test_pixel_size_from_geographic_and_projected_transforms():
+    from app.ml_service.runtime import pixel_size_m
+
+    # 1° of longitude at 53.5°N ≈ 66 km, so 0.00001° per pixel ≈ 0.66 m (x); latitude ≈ 1.11 m (y).
+    m = pixel_size_m([27.0, 1e-5, 0, 53.5, 0, -1e-5], "EPSG:4326", 1000)
+    assert 0.85 < m < 0.95  # mean of ~0.67 and ~1.11
+    assert pixel_size_m([500000.0, 0.3, 0, 5900000.0, 0, -0.3], "EPSG:32635", 1000) == 0.3
+    assert pixel_size_m(None, "EPSG:4326", 100) is None
+    assert pixel_size_m([0, 0, 0, 0, 0, 0], "EPSG:4326", 100) is None
+
+
+def test_choose_working_scale_matches_training_scale_within_budget():
+    from app.ml_service.runtime import choose_working_scale, count_windows
+
+    # small AOI at 0.35 m/px: up to 2× upscale only (0.175 m/px), few windows
+    work, h, w, n = choose_working_scale(
+        400, 500, 0.35, target_m_per_px=0.1, tile=512, stride=384, max_windows=49
+    )
+    assert abs(work - 0.175) < 1e-9 and (h, w) == (800, 1000) and n == count_windows(800, 1000, 512, 384)
+
+    # finer source than the target: downscale to exactly 0.1 m/px
+    work, h, w, _ = choose_working_scale(
+        2000, 2000, 0.05, target_m_per_px=0.1, tile=512, stride=384, max_windows=49
+    )
+    assert abs(work - 0.1) < 1e-9 and (h, w) == (1000, 1000)
+
+    # whole 40 ha field (~632 m) at z18 (0.35 m/px ≈ 1806 px): the window budget is respected
+    work, h, w, n = choose_working_scale(
+        1806, 1806, 0.35, target_m_per_px=0.1, tile=512, stride=384, max_windows=49
+    )
+    assert n <= 49 and work >= 0.175
+    assert work < 0.35  # still finer than what the frontend sent
+
+    # no georeference: untouched
+    assert choose_working_scale(300, 300, None, target_m_per_px=0.1, tile=512, stride=384, max_windows=49)[:3] == (
+        None,
+        300,
+        300,
+    )
+
+
+def test_run_segformer_resamples_and_maps_back(monkeypatch):
+    import sys
+    import types
+
+    import importlib.util
+
+    import numpy as np
+
+    spec = importlib.util.spec_from_file_location(
+        "segmentation_service.schemas", ROOT / "app" / "segmentation_service" / "schemas.py"
+    )
+    schemas = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(schemas)
+    seen = {}
+
+    def fake_run_segmentation(rt, *, rgb=None, request=None, on_progress=None, **_kw):
+        seen["shape"] = rgb.shape
+        if on_progress:
+            on_progress(1, 1)
+        h, w = rgb.shape[:2]
+        return schemas.SegmentResponse(
+            navigable=schemas.PolygonPayload(polygon_px=[], area_px=0.0, valid=False),
+            polygons=[
+                schemas.PolygonItem(
+                    polygon_px=[(0, 0), (w, 0), (w, h), (0, h)],
+                    holes_px=[[(10, 10), (20, 10), (20, 20), (10, 20)]],
+                    area_px=float(w * h),
+                )
+            ],
+            image_hw=(h, w),
+            checkpoint="x",
+            metrics=schemas.SegmentMetrics(
+                threshold_used=0.4, area_frac=1.0, prob_mean=0.5, prob_std=0.1,
+                mode="prob_only", inference_ms=1.0, fp16=False, device="cpu",
+            ),
+        )
+
+    fake_pipeline = types.ModuleType("segmentation_service.pipeline")
+    fake_pipeline.run_segmentation = fake_run_segmentation
+    monkeypatch.setitem(sys.modules, "segmentation_service", types.ModuleType("segmentation_service"))
+    monkeypatch.setitem(sys.modules, "segmentation_service.pipeline", fake_pipeline)
+    monkeypatch.setitem(sys.modules, "segmentation_service.schemas", schemas)
+
+    class FakeSeg:
+        meta = {"tile_size": 512}
+
+        class settings:
+            tile_size = 512
+            sliding_stride = 384
+
+    engine = ModelRuntime()
+    engine._segformer = FakeSeg()
+    progress = []
+    image = np.zeros((300, 400, 3), dtype=np.uint8)  # 0.35 m/px → worked at 0.175 m/px (×2)
+    payload = engine._run_segformer(image, 0.4, 0.35, lambda d, t: progress.append((d, t)))
+    assert seen["shape"] == (600, 800, 3)
+    assert progress == [(1, 1)]
+    rings = payload["polygons"][0]["geometry"]["coordinates"]
+    assert rings[0][2] == [400.0, 300.0]  # outer ring back in source pixels
+    assert len(rings) == 2 and rings[1][1] == [10.0, 5.0]  # hole kept and scaled back
+    assert abs(payload["info"]["work_m_per_px"] - 0.175) < 1e-9
+    assert payload["info"]["work_size"] == [800, 600]
+
+
+def test_run_yolo_works_at_training_scale():
+    import numpy as np
+
+    from app.ml_service.runtime import ModelRuntime
+
+    names = {6: "water"}
+    square = np.array([[10, 10], [60, 10], [60, 60], [10, 60]], dtype=float)
+
+    class Boxes:
+        cls = np.array([6])
+        conf = np.array([0.9])
+
+    class Masks:
+        xy = [square]
+
+    class Result:
+        boxes = Boxes()
+        masks = Masks()
+
+    class FakeYolo:
+        overrides = {"imgsz": 640}
+
+        def __init__(self):
+            self.names = names
+            self.shapes = []
+
+        def predict(self, image, conf, verbose, **kwargs):
+            batch = image if isinstance(image, list) else [image]
+            self.shapes.extend(crop.shape[:2] for crop in batch)
+            return [Result() for _ in batch]
+
+    engine = ModelRuntime()
+    engine._yolo = FakeYolo()
+    # 400×300 px at 0.35 m/px → ×2 upscale (0.175 m/px) = 800×600, one pass (≤ 1.5 tiles)
+    payload = engine._run_yolo(np.zeros((300, 400, 3), dtype=np.uint8), 0.25, 0.35)
+    assert engine._yolo.shapes == [(600, 800)]
+    ring = payload["polygons"][0]["geometry"]["coordinates"][0]
+    assert ring[0] == [5.0, 5.0] and ring[1] == [30.0, 5.0]  # back in source pixels
+    assert payload["info"]["work_size"] == [800, 600]
+
+
+def test_mask_to_polygons_keeps_forest_holes():
+    import sys
+
+    import numpy as np
+
+    sys.path.insert(0, str(ROOT / "app"))
+    from ml_core.polygon import mask_to_polygons
+
+    mask = np.zeros((400, 400), dtype=np.uint8)
+    mask[20:380, 20:380] = 1
+    mask[150:250, 150:250] = 0  # forest island inside the field
+    kept = mask_to_polygons(mask, min_area_px=500, simplify_tolerance=1.0, keep_holes=True)
+    filled = mask_to_polygons(mask, min_area_px=500, simplify_tolerance=1.0)
+    assert len(kept) == 1 and len(kept[0]["holes_px"]) == 1
+    assert kept[0]["area_px"] < filled[0]["area_px"]
+    assert "holes_px" not in filled[0]

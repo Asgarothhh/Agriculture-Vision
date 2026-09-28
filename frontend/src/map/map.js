@@ -311,7 +311,7 @@ export function showResultOverlay(geojson) {
 
 const TILE_FETCH_TIMEOUT_MS = 8000;
 
-async function fetchTileBitmap(src) {
+async function fetchTileBitmap(src, minBytes = 0) {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), TILE_FETCH_TIMEOUT_MS);
   try {
@@ -320,7 +320,10 @@ async function fetchTileBitmap(src) {
     const type = (res.headers.get("content-type") || "").toLowerCase();
     // An SPA fallback (index.html) instead of a tile means the proxy location is missing.
     if (type && !type.startsWith("image/")) return null;
-    return await createImageBitmap(await res.blob());
+    const blob = await res.blob();
+    // A tiny tile is a «no imagery here» placeholder, not a photo.
+    if (minBytes && blob.size < minBytes) return null;
+    return await createImageBitmap(blob);
   } finally {
     clearTimeout(timer);
   }
@@ -423,6 +426,12 @@ export const CAPTURE_TILE = 256;
 export const CAPTURE_MAX_EDGE = 4096;
 export const CAPTURE_MAX_ZOOM = 18;
 const CAPTURE_PARALLEL = 8;
+// dzz.by orthophoto is ~0.1 m/px — the scale the models are trained on.
+const DZZ_TARGET_M_PER_PX = 0.1;
+// Esri z19 (~0.18 m/px) only for areas the server can process near that scale anyway.
+const SATELLITE_Z19_MAX_EDGE = 3072;
+// Esri answers missing z19 imagery with a small grey «no data» tile.
+const PLACEHOLDER_TILE_BYTES = 2500;
 
 /**
  * Highest zoom (≤ maxZoom) at which the area fits into `maxEdge` pixels; then raised
@@ -466,7 +475,7 @@ function captureTileUrls(z, x, y) {
   return [L.Util.template(ESRI_PROXY_TEMPLATE, { x, y, z }), L.Util.template(ESRI_DIRECT_TEMPLATE, { x, y, z })];
 }
 
-async function loadCaptureTile(urls) {
+async function loadCaptureTile(urls, { minBytes = 0 } = {}) {
   for (const url of urls) {
     try {
       if (basemapKind === "dzz") {
@@ -474,7 +483,7 @@ async function loadCaptureTile(urls) {
         if (!blob || blob.size < 400) continue;
         return await createImageBitmap(blob);
       }
-      const bmp = await fetchTileBitmap(url);
+      const bmp = await fetchTileBitmap(url, minBytes);
       if (bmp) return bmp;
     } catch {
       /* next candidate */
@@ -499,13 +508,34 @@ function boundsToGeo(bounds) {
   return { west: bounds.getWest(), south: bounds.getSouth(), east: bounds.getEast(), north: bounds.getNorth() };
 }
 
-async function captureTileMosaic(bounds) {
-  const edgeAt = (z) => {
+function captureEdgeAt(bounds) {
+  return (z) => {
     const nw = map.project(bounds.getNorthWest(), z);
     const se = map.project(bounds.getSouthEast(), z);
     return { w: Math.abs(se.x - nw.x), h: Math.abs(se.y - nw.y) };
   };
-  const zoom = chooseCaptureZoom(edgeAt, map.getZoom());
+}
+
+/**
+ * Satellite: for areas small enough, try native z19 (≈0.18 m/px, closer to the 0.1 m/px
+ * the models are trained on); if Esri has no z19 imagery there, fall back to z18.
+ */
+async function captureSatellite(bounds) {
+  const edge = captureEdgeAt(bounds)(19);
+  if (basemapKind === "satellite" && Math.max(edge.w, edge.h) <= SATELLITE_Z19_MAX_EDGE) {
+    try {
+      const shot = await captureTileMosaic(bounds, { maxZoom: 19, minBytes: PLACEHOLDER_TILE_BYTES });
+      if (shot.info.zoom === 19 && shot.info.painted >= shot.info.tiles * 0.9) return shot;
+    } catch {
+      /* no z19 here: z18 below */
+    }
+  }
+  return captureTileMosaic(bounds);
+}
+
+async function captureTileMosaic(bounds, { maxZoom = CAPTURE_MAX_ZOOM, minBytes = 0 } = {}) {
+  const edgeAt = captureEdgeAt(bounds);
+  const zoom = chooseCaptureZoom(edgeAt, map.getZoom(), { maxZoom });
   const nwPix = map.project(bounds.getNorthWest(), zoom);
   const sePix = map.project(bounds.getSouthEast(), zoom);
   const minX = Math.min(nwPix.x, sePix.x);
@@ -541,7 +571,7 @@ async function captureTileMosaic(bounds) {
       const dy = (ty - tileMinY) * CAPTURE_TILE;
       total += 1;
       jobs.push(async () => {
-        const bmp = await loadCaptureTile(captureTileUrls(zoom, x, ty));
+        const bmp = await loadCaptureTile(captureTileUrls(zoom, x, ty), { minBytes });
         if (!bmp) return;
         try {
           mctx.drawImage(bmp, dx, dy, CAPTURE_TILE, CAPTURE_TILE);
@@ -591,8 +621,12 @@ async function captureDzzExport(bounds) {
   const ymin = Math.min(sw.y, ne.y);
   const ymax = Math.max(sw.y, ne.y);
   const aspect = (xmax - xmin) / Math.max(1, ymax - ymin);
-  let w = CAPTURE_MAX_EDGE;
-  let h = CAPTURE_MAX_EDGE;
+  // Web-Mercator units are stretched by 1/cos(lat): ground metres of the longer side.
+  const cosLat = Math.cos((bounds.getCenter().lat * Math.PI) / 180);
+  const longMeters = Math.max(xmax - xmin, ymax - ymin) * cosLat;
+  const longPx = Math.max(256, Math.min(CAPTURE_MAX_EDGE, Math.round(longMeters / DZZ_TARGET_M_PER_PX)));
+  let w = longPx;
+  let h = longPx;
   if (aspect >= 1) h = Math.max(64, Math.round(w / aspect));
   else w = Math.max(64, Math.round(h * aspect));
   const url = toSameOriginDzzUrl(
@@ -633,7 +667,7 @@ export async function captureMapJpeg() {
       }
       if (!shot) {
         try {
-          shot = await captureTileMosaic(bounds);
+          shot = await captureSatellite(bounds);
         } catch (err) {
           if (isSecurityError(err)) throw err;
           console.warn("tile mosaic capture → screen", err);
