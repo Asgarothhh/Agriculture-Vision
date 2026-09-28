@@ -82,7 +82,7 @@ build-images:
       - config/segformer_best.pt
     policy: pull-push
   script:
-    - minikube status || minikube start --driver=docker --memory=8192 --cpus=4 || (minikube delete --all && minikube start --driver=docker --memory=8192 --cpus=4)
+    - minikube status || minikube start --driver=docker --container-runtime=docker --memory=8192 --cpus=4 || (minikube delete --all && minikube start --driver=docker --container-runtime=docker --memory=8192 --cpus=4)
     - eval "$(minikube docker-env)"
     - bash deploy/prepare-weights.sh
     - docker build -f deploy/Dockerfile.api -t "$API_IMAGE:$CI_COMMIT_SHORT_SHA" .
