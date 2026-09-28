@@ -13,24 +13,38 @@ import { bindPasswordToggles, closeAppModal, $, showToast } from "./ui.js";
 import {
   applyDisplaySettings,
   applyLiveStyles,
-  createFolder,
-  filterLayers,
   importLayerFile,
   loadMapData,
-  onFieldCropSelect,
-  populateCropSelect,
   restoreDisplaySettings,
-  saveFieldName,
+  setMapDisplayOption,
   startAoiSelection,
-  startCreateArea,
-  startPolygonArea,
-  startMergePolygonsMode,
-  toggleCreateLayerForm,
 } from "./layers/store.js";
+import {
+  closeFolderPicker,
+  createFolder,
+  filterLayers,
+  initLayersPanel,
+  onFieldCropSelect,
+  saveFieldName,
+  toggleCreateLayerForm,
+} from "./layers/panel.js";
 import { clearAoi, initMap, setBasemap, setDzzTileGrid } from "./map/map.js";
-import { activateMapTool, cancelMergeMode, finishEditAreaMode, mergeSelectedPair, openEditAreaMode, setEditDrawMode } from "./map/tools.js";
+import {
+  activateMapTool,
+  cancelMergeMode,
+  confirmMergePolygons,
+  finishEditAreaMode,
+  onDrawLayerSelect,
+  openEditAreaMode,
+  resetTools,
+  setEditDrawMode,
+  startCreateArea,
+  startManualConnectMode,
+  startMergePolygonsMode,
+  startPolygonMode,
+} from "./map/tools.js";
 import { bindHotkeys, bindSidebarResize } from "./map/hotkeys.js";
-import { redoLast, undoLast } from "./map/undo.js";
+import { clearUndo, redoLast, undoLast } from "./map/undo.js";
 import {
   handleUploadFile,
   onSegArchitectureChange,
@@ -54,6 +68,7 @@ import {
   testDzzAccess,
 } from "./dzz/panel.js";
 import { exportLayers } from "./export/download.js";
+import { initDzzDock, setDzzDockMode, toggleDzzDock } from "./dzz/dock.js";
 import { deleteAccount, refreshAccountStats, renderHistoryFeed, saveProfile } from "./account/profile.js";
 import { CLASS_CHECKBOXES } from "./layers/store.js";
 
@@ -124,10 +139,11 @@ async function onAppReady() {
   bindHotkeys();
   bindSidebarResize();
   restoreDisplaySettings();
-  activateMapTool("select");
+  activateMapTool("select", { silent: true });
+  initLayersPanel();
   await loadMapData();
-  populateCropSelect();
   startMlHealthPolling();
+  initDzzDock();
   startDzzPolling();
   restoreClassCheckboxes();
   const savedArch = localStorage.getItem("ttz_ml_architecture");
@@ -150,6 +166,8 @@ async function onAppReady() {
 function onAppLogout() {
   stopDzzPolling();
   stopMlHealthPolling();
+  resetTools();
+  clearUndo();
 }
 
 const CLASS_STORAGE_KEY = "ttz_class_checkboxes";
@@ -184,9 +202,6 @@ function saveClassCheckboxes() {
 
 setAuthCallbacks({ ready: onAppReady, logout: onAppLogout });
 
-function closeFolderPicker() {
-  $("folder-picker").style.display = "none";
-}
 
 function saveSettings() {
   const value = $("opt-basemap")?.value;
@@ -209,9 +224,6 @@ function toggleLayerGroup(id) {
 function toggleFieldDetailPanel() {
   $("field-detail-body")?.classList.toggle("collapsed");
 }
-function setMapDisplayOption(key, checked) {
-  localStorage.setItem(key === "labels" ? "ttz_field_labels" : "ttz_field_coords", checked ? "1" : "0");
-}
 function shiftDzzTile(dx, dy) {
   const source = $("dzz-bar-z") ? "bar" : "opt";
   const zEl = $(source === "bar" ? "dzz-bar-z" : "opt-dzz-tile-z");
@@ -222,13 +234,6 @@ function shiftDzzTile(dx, dy) {
   yEl.value = String(Number(yEl.value || 0) + dy);
   if (zEl && !zEl.value) zEl.value = "13";
   goToDzzTileFromForm(source);
-}
-function setDzzDockMode(mode) {
-  $("dzz-sites-pane").hidden = mode !== "sites";
-  $("dzz-tiles-pane").hidden = mode !== "tiles";
-}
-function toggleDzzDock() {
-  $("dzz-sites-bar")?.classList.toggle("open");
 }
 function handleAvatarFile() {}
 
@@ -324,7 +329,7 @@ function bindUi() {
   });
   $("polygon-area-item")?.addEventListener("click", (event) => {
     event.stopPropagation();
-    startPolygonArea();
+    startPolygonMode();
   });
   $("edit-area-item")?.addEventListener("click", (event) => {
     event.stopPropagation();
@@ -334,9 +339,12 @@ function bindUi() {
     event.stopPropagation();
     startMergePolygonsMode();
   });
-  $("merge-confirm-btn")?.addEventListener("click", () => {
-    mergeSelectedPair();
+  $("merge-confirm-btn")?.addEventListener("click", confirmMergePolygons);
+  $("manual-connect-menu-item")?.addEventListener("click", (event) => {
+    event.stopPropagation();
+    startManualConnectMode();
   });
+  $("draw-layer-select")?.addEventListener("change", (event) => onDrawLayerSelect(event.target.value));
   $("merge-cancel-btn")?.addEventListener("click", () => {
     cancelMergeMode();
   });

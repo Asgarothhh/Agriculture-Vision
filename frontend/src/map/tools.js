@@ -1,54 +1,117 @@
-import { escapeHtml, showToast, openAppModal, closeAppModal, $ } from "../ui.js";
-import * as layersApi from "../api/layers.js";
+// Map tools, ported from the reference UI (Web-markup-updated/app.js) onto the backend:
+// selection, ruler, compass, text, create/edit area (brush, eraser, «по точкам»),
+// merge, «Соединить линией», Delete, selection history (J) and undo for all of them.
+// Object changes go through the API and the in-memory model (layers/store.js);
+// ruler/compass/text marks are local map overlays, as in the reference.
+import { $, closeAppModal, confirmModal, escapeHtml, openAppModal, showToast } from "../ui.js";
+import { logAction } from "../api/activity.js";
 import {
-  loadMapData,
-  persistDrawnLayer,
-  patchObjectGeom,
-  getObjectRecord,
   allObjectRecords,
-  highlightObjects,
+  clearIdAliases,
+  coordColor,
+  createLayerQuick,
+  currentDrawLayerId,
+  getLayer,
+  getMapDisplay,
+  getObjectRecord,
+  isRecordVisible,
+  onRecordsChanged,
   populateDrawLayerSelect,
+  setMapDisplayOption,
+  styleFor,
 } from "../layers/store.js";
-import { getFeatureGroup, getMap, rememberBounds } from "./map.js";
+import { createTracked, deleteTracked, mergeTracked, moveTracked, patchTracked } from "../layers/ops.js";
+import { populateCropSelect } from "../layers/panel.js";
+import { getFeatureGroup, getMap } from "./map.js";
 import {
-  bufferStroke,
   bridgePolygons,
   circlePolygon,
-  diffGeom,
-  formatArea,
+  differenceGeom,
+  distanceToGeomM,
+  formatAreaHa,
   geodesicAreaM2,
-  geomContainsLatLng,
-  isClosedStroke,
+  isLoopClosedM,
+  keepLargestPart,
+  mainCornerPoints,
+  outerRingLatLngs,
+  outlinePolygonGeom,
   polygonFromLatLngs,
-  simplifyLatLngs,
-  strokeLengthPx,
+  polygonParts,
+  strokeBufferGeom,
   unionGeom,
 } from "./geometry.js";
-import { pushUndo } from "./undo.js";
+import { pushUndo, setUndoHook } from "./undo.js";
+
+const TOOL_NAMES = {
+  select: "Выделение области",
+  ruler: "Линейка",
+  compass: "Циркуль",
+  text: "Текст",
+  freehand: "Редактирование области",
+  polygon: "Полигон по точкам",
+};
 
 let active = "select";
-let scratch = null;
-let preview = null;
-let rulerPts = [];
-let compassCenter = null;
-let compassRadius = 0;
-let brushPts = [];
-let drawing = false;
-let handlers = [];
-let selected = [];
-let annotations = [];
-let editMode = "brush";
-let paintIntent = "create";
-let mergePicks = [];
-let vertexPts = [];
-let labelsOn = true;
-let coordsOn = true;
+let bound = false;
+let selected = []; // object ids, all from one layer
+let mergeActive = false;
+let createSession = false;
+let editDrawMode = null; // create | brush | eraser | connect | polygon
 
-const DRAW_HINTS = {
-  brush: "Зажмите ЛКМ и ведите. Замкните к зелёной точке — полигон; короткий штрих — полоса по толщине.",
-  eraser: "Зажмите и проведите по области, чтобы вырезать. Полное стирание контура отменяется.",
-  polygon: "Кликайте вершины. Белые точки на концах отрезков; зелёная — замкнуть. Enter или двойной клик — готово.",
-};
+let overlaysGroup = null;
+let textGroup = null;
+let overlays = [];
+let hoveredOverlay = null;
+let selectedOverlay = null;
+
+let rulerStart = null;
+let rulerPreview = null;
+let compassCenter = null;
+let compassDraft = null;
+let compassPreview = null;
+let lastCompassCircle = null;
+
+let freehandActive = false;
+let freehandPath = [];
+let freehandPreview = null;
+let freehandTargetId = null;
+let brushCursor = null;
+let brushCursorMeta = { radius: null, isEraser: null };
+
+let vertexPts = [];
+let vertexScratch = null;
+
+const outlines = new Map();
+let vertexMarkers = [];
+const selectionHistory = [];
+let historyCursor = -1;
+
+// Server edits run one after another, so each stroke starts from the saved result of the previous one.
+let opChain = Promise.resolve();
+
+function map() {
+  return getMap();
+}
+
+function display() {
+  return styleFor({});
+}
+
+function queue(task) {
+  const next = opChain.then(task).catch((err) => showToast(err?.message || String(err), true));
+  opChain = next;
+  return next;
+}
+
+function isPointRecord(record) {
+  return !!record && (record.obj.is_point || /Point$/.test(record.obj.geom?.type || ""));
+}
+
+function partsOf(record) {
+  const out = [];
+  record?.leaflet?.eachLayer?.((part) => out.push(part));
+  return out;
+}
 
 export function getSelected() {
   return selected.slice();
@@ -58,451 +121,1172 @@ export function currentMapTool() {
   return active;
 }
 
-function map() {
-  return getMap();
+/* ---------------------------------------------------------------- selection */
+
+function clearOutline(id) {
+  (outlines.get(id) || []).forEach((layer) => map()?.removeLayer(layer));
+  outlines.delete(id);
 }
 
-function clearScratch() {
+function applySelectedStyle(record) {
+  if (!record) return;
+  const base = styleFor(record.layer);
   const m = map();
-  if (scratch && m) m.removeLayer(scratch);
-  if (preview && m) m.removeLayer(preview);
-  scratch = null;
-  preview = null;
-}
-
-function isDomTarget(target) {
-  return target === document || (typeof HTMLElement !== "undefined" && target instanceof HTMLElement);
-}
-
-function detach() {
-  const m = map();
-  handlers.forEach(([ev, fn, target, capture]) => {
-    if (isDomTarget(target)) target.removeEventListener(ev, fn, !!capture);
-    else (target || m)?.off(ev, fn);
-  });
-  handlers = [];
-  rulerPts = [];
-  compassCenter = null;
-  brushPts = [];
-  drawing = false;
-  mergePicks = [];
-  vertexPts = [];
-  if (m?.dragging) m.dragging.enable();
-  if (m?.doubleClickZoom) m.doubleClickZoom.enable();
-  clearScratch();
-}
-
-function wrapDom(fn) {
-  return (domEv) => {
-    const m = map();
-    if (!m) return;
-    let latlng = null;
-    try {
-      latlng = m.mouseEventToLatLng(domEv);
-    } catch {
-      latlng = null;
+  clearOutline(record.obj.id);
+  const lines = [];
+  partsOf(record).forEach((part) => {
+    const isPoint = !part.getLatLngs;
+    const fill = Math.min(0.85, (isPoint ? base.pointFillOpacity : base.fillOpacity) + 0.2);
+    part.setStyle?.({ color: "#ffffff", fillColor: base.color, fillOpacity: fill, weight: base.weight });
+    // A thicker line on the clickable shape itself would widen its hit area over the
+    // neighbour; the white outline is a separate non-interactive layer, as in the reference.
+    if (m && part.getLatLngs && m.hasLayer(part)) {
+      const Ctor = part instanceof L.Polygon ? L.polygon : L.polyline;
+      lines.push(
+        Ctor(part.getLatLngs(), {
+          color: "#ffffff",
+          weight: base.weight + 3,
+          fill: false,
+          interactive: false,
+          className: "selection-outline",
+        }).addTo(m),
+      );
     }
-    fn({ latlng, originalEvent: domEv });
-  };
-}
-
-function on(ev, fn, target) {
-  if (isDomTarget(target)) {
-    const wrapped = wrapDom(fn);
-    const capture = ev === "mousedown" || ev === "pointerdown";
-    target.addEventListener(ev, wrapped, capture);
-    handlers.push([ev, wrapped, target, capture]);
-    return;
-  }
-  const src = target || map();
-  src.on(ev, fn);
-  handlers.push([ev, fn, target, false]);
-}
-
-function coordColor() {
-  return $("opt-coord-color")?.value || "#e14059";
-}
-
-function brushMeters() {
-  return Number($("brush-size")?.value || 20);
-}
-
-function isMod(ev) {
-  const o = ev.originalEvent || ev;
-  return !!(o.ctrlKey || o.metaKey || o.shiftKey);
-}
-
-function findPart(e) {
-  return e.layer || e.target;
-}
-
-export function setSelection(ids, { additive = false } = {}) {
-  if (!additive) selected = [];
-  ids.forEach((id) => {
-    if (!selected.includes(id)) selected.push(id);
+    part.bringToFront?.();
   });
-  highlightObjects(selected);
-  const one = selected.length === 1 ? getObjectRecord(selected[0]) : null;
-  if (one) {
-    $("field-detail-panel").style.display = "block";
-    $("field-name-input").value = one.obj.name || "";
-    $("field-name-input").dataset.objectId = one.obj.id;
-    const isPoint = /Point$/.test(one.obj.geom?.type || "");
-    // geodesicAreaM2 walks polygon rings; a point has none (it used to throw here).
-    $("field-area-value").textContent = isPoint ? "точечный объект" : formatArea(geodesicAreaM2(one.obj.geom));
-  } else if (!selected.length) {
-    $("field-detail-panel").style.display = "none";
+  lines.forEach((line) => line.bringToFront());
+  outlines.set(record.obj.id, lines);
+}
+
+function resetStyle(record) {
+  if (!record) return;
+  const base = styleFor(record.layer);
+  partsOf(record).forEach((part) => {
+    const isPoint = !part.getLatLngs;
+    part.setStyle?.({
+      color: base.color,
+      fillColor: base.color,
+      fillOpacity: isPoint ? base.pointFillOpacity : base.fillOpacity,
+      weight: base.weight,
+    });
+  });
+  clearOutline(record.obj.id);
+}
+
+function clearVertexMarkers() {
+  vertexMarkers.forEach((marker) => map()?.removeLayer(marker));
+  vertexMarkers = [];
+}
+
+function showVertexMarkers(record) {
+  clearVertexMarkers();
+  const m = map();
+  if (!m || !record || !getMapDisplay().coords || !isRecordVisible(record)) return;
+  const ring = outerRingLatLngs(record.obj.geom);
+  if (!ring.length) return;
+  let keyPoints = isPointRecord(record) ? [ring[0]] : mainCornerPoints(ring);
+  if (keyPoints.length < 2 && ring.length >= 2) keyPoints = [ring[0], ring[Math.floor(ring.length / 2)]];
+  const color = coordColor();
+  const radius = Math.max(4, display().pointSize || 5);
+  vertexMarkers = keyPoints.map((pt) =>
+    L.circleMarker(pt, { radius, color, fillColor: color, fillOpacity: 1, weight: 2, interactive: false })
+      .addTo(m)
+      .bindTooltip(`${pt.lat.toFixed(6)}, ${pt.lng.toFixed(6)}`, {
+        permanent: true,
+        direction: "top",
+        offset: [0, -8],
+        opacity: 0.95,
+        className: "coord-tooltip",
+      }),
+  );
+}
+
+function showFieldDetail(record) {
+  const panel = $("field-detail-panel");
+  if (!panel || !record) return;
+  panel.style.display = "block";
+  const input = $("field-name-input");
+  if (input) {
+    if (input.dataset.objectId !== String(record.obj.id) || document.activeElement !== input) {
+      input.value = record.obj.name || "";
+    }
+    input.dataset.objectId = record.obj.id;
+  }
+  const area = $("field-area-value");
+  if (area) area.textContent = isPointRecord(record) ? "точечный объект" : formatAreaHa(geodesicAreaM2(record.obj.geom));
+  if (document.activeElement !== $("field-crop-select")) populateCropSelect(record.obj.crop || "");
+}
+
+function hideFieldDetail() {
+  const panel = $("field-detail-panel");
+  if (panel) panel.style.display = "none";
+  const input = $("field-name-input");
+  if (input) delete input.dataset.objectId;
+}
+
+function recordSelectionHistory(record) {
+  let bounds;
+  try {
+    bounds = record?.leaflet?.getBounds?.();
+  } catch {
+    return;
+  }
+  if (!bounds?.isValid?.()) return;
+  const last = selectionHistory.at(-1);
+  if (last && last.equals(bounds)) return;
+  selectionHistory.push(bounds);
+  if (selectionHistory.length > 50) selectionHistory.shift();
+  historyCursor = -1;
+}
+
+/** J: back to recently selected areas, newest first, then round again. */
+export function jumpToSelectionHistory() {
+  const m = map();
+  if (!m || !selectionHistory.length) {
+    showToast("Пока нет истории выделенных областей", true);
+    return;
+  }
+  historyCursor = historyCursor <= 0 ? selectionHistory.length - 1 : historyCursor - 1;
+  m.fitBounds(selectionHistory[historyCursor], { maxZoom: 17, padding: [60, 60] });
+  const fromEnd = selectionHistory.length - historyCursor;
+  showToast(`Область ${fromEnd} из ${selectionHistory.length} (от недавней к первой)`);
+}
+
+function clearSelection() {
+  selected.forEach((id) => resetStyle(getObjectRecord(id)));
+  outlines.forEach((_lines, id) => clearOutline(id));
+  selected = [];
+  clearVertexMarkers();
+  updateMergeModePanel();
+}
+
+function afterSelectionChange() {
+  selected.forEach((id) => applySelectedStyle(getObjectRecord(id)));
+  if (selected.length === 1) {
+    const record = getObjectRecord(selected[0]);
+    showVertexMarkers(record);
+    recordSelectionHistory(record);
+  } else clearVertexMarkers();
+  updateMergeModePanel();
+}
+
+function selectFeature(id, multi = false) {
+  const record = getObjectRecord(id);
+  if (!record) return;
+  if (!multi) {
+    clearSelection();
+    selected = [id];
+  } else {
+    const idx = selected.indexOf(id);
+    if (idx >= 0) {
+      resetStyle(record);
+      selected.splice(idx, 1);
+      if (selected.length === 1) {
+        const one = getObjectRecord(selected[0]);
+        showVertexMarkers(one);
+        showFieldDetail(one);
+        recordSelectionHistory(one);
+      } else {
+        clearVertexMarkers();
+        hideFieldDetail();
+      }
+      updateMergeModePanel();
+      return;
+    }
+    const layerId = record.layer.id;
+    const sameLayer = !selected.length || selected.every((sid) => getObjectRecord(sid)?.layer.id === layerId);
+    if (!sameLayer) {
+      showToast("Мультивыбор только в пределах одного слоя", true);
+      clearSelection();
+      selected = [id];
+    } else selected.push(id);
+  }
+  selectedOverlay = null;
+  afterSelectionChange();
+}
+
+/** Selects one object from outside the map (layers list etc.). */
+export function selectObjectById(id, { zoom = false } = {}) {
+  const record = getObjectRecord(id);
+  if (!record) return;
+  selectFeature(id, false);
+  showFieldDetail(record);
+  if (zoom) {
+    const bounds = record.leaflet?.getBounds?.();
+    if (bounds?.isValid?.()) map()?.fitBounds(bounds, { maxZoom: 16, padding: [40, 40] });
   }
 }
 
-function onSelectClick(e) {
-  L.DomEvent.stop(e);
-  const part = findPart(e);
+/** Kept for older callers: plain selection by ids. */
+export function setSelection(ids, { additive = false } = {}) {
+  if (!additive) clearSelection();
+  ids.forEach((id) => {
+    if (getObjectRecord(id) && !selected.includes(id)) selected.push(id);
+  });
+  afterSelectionChange();
+  if (selected.length === 1) showFieldDetail(getObjectRecord(selected[0]));
+  else if (!selected.length) hideFieldDetail();
+}
+
+/** Records were rebuilt (server answer, visibility…): restyle what is still selected. */
+function onRecordsRebuilt() {
+  outlines.forEach((_lines, id) => clearOutline(id));
+  selected = selected.filter((id) => isRecordVisible(getObjectRecord(id)));
+  selected.forEach((id) => applySelectedStyle(getObjectRecord(id)));
+  if (selected.length === 1) {
+    const record = getObjectRecord(selected[0]);
+    showVertexMarkers(record);
+    if ($("field-detail-panel")?.style.display === "block") showFieldDetail(record);
+  } else {
+    clearVertexMarkers();
+    if (!selected.length) hideFieldDetail();
+  }
+  updateMergeModePanel();
+}
+
+function stopLeaflet(e) {
+  L.DomEvent.stopPropagation(e);
+  if (e.originalEvent) {
+    L.DomEvent.preventDefault(e.originalEvent);
+    L.DomEvent.stopPropagation(e.originalEvent);
+  }
+}
+
+function onObjectClick(e) {
+  if (active !== "select") return;
+  const part = e.propagatedFrom || e.layer;
   const obj = part?.avObject;
-  if (!obj) {
-    if (!isMod(e)) setSelection([]);
+  if (!obj) return;
+  // Stop here so the map click (which clears the selection) does not follow.
+  stopLeaflet(e);
+  const id = obj.id;
+  if (mergeActive) {
+    toggleMergeSelection(id);
     return;
   }
-  if (selected.length === 1 && selected[0] === obj.id && !isMod(e)) {
+  const oe = e.originalEvent || {};
+  const multi = !!(oe.ctrlKey || oe.metaKey || oe.shiftKey);
+  // A click on the only selected object switches to editing it (as in the reference).
+  if (!multi && selected.length === 1 && selected[0] === id) {
     openEditAreaMode();
     return;
   }
-  if (isMod(e)) setSelection([obj.id], { additive: true });
-  else setSelection([obj.id]);
-  rememberBounds(part.getBounds?.());
-}
-
-function onMapBlankClick(e) {
-  if (e.originalEvent?.target?.closest?.(".leaflet-interactive")) return;
-  if (!isMod(e)) setSelection([]);
-}
-
-function tickStep(zoom) {
-  if (zoom >= 16) return 10;
-  if (zoom >= 14) return 20;
-  if (zoom >= 12) return 50;
-  return 100;
-}
-
-function onRulerClick(e) {
-  const m = map();
-  if (!scratch) scratch = L.layerGroup().addTo(m);
-  if (rulerPts.length >= 2) {
-    rulerPts = [];
-    scratch.clearLayers();
+  selectedOverlay = null;
+  selectFeature(id, multi);
+  if (selected.length === 1) showFieldDetail(getObjectRecord(selected[0]));
+  else if (selected.length > 1) {
+    hideFieldDetail();
+    showToast(`Выбрано: ${selected.length} · Ctrl+M — объединить`);
   }
-  rulerPts.push(e.latlng);
-  L.circleMarker(e.latlng, { radius: 5, color: coordColor(), fillOpacity: 1 }).addTo(scratch);
-  if (rulerPts.length === 1) {
-    preview = L.polyline([e.latlng, e.latlng], { color: coordColor(), dashArray: "6 4", weight: 2 }).addTo(m);
+}
+
+function onObjectDblClick(e) {
+  // The second click means «edit», not «zoom in».
+  if (active === "select") stopLeaflet(e);
+}
+
+function onMapClick(e) {
+  if (active === "freehand") return;
+  if (active === "select") {
+    const oe = e.originalEvent;
+    if (oe && (oe.ctrlKey || oe.metaKey || oe.shiftKey)) return;
+    clearSelection();
+    hideFieldDetail();
+    selectedOverlay = null;
     return;
   }
-  finalizeRuler(rulerPts[0], rulerPts[1]);
+  if (active === "ruler") handleRulerClick(e);
+  else if (active === "compass") handleCompassClick(e);
+  else if (active === "text") handleTextClick(e);
+  else if (active === "polygon") handlePolygonClick(e);
 }
 
-function onRulerMove(e) {
-  if (rulerPts.length !== 1 || !preview) return;
-  preview.setLatLngs([rulerPts[0], e.latlng]);
-  const meters = map().distance(rulerPts[0], e.latlng);
-  preview.bindTooltip(formatDist(meters), { permanent: true, direction: "center" }).openTooltip(e.latlng);
+/* ---------------------------------------------------------------- overlays */
+
+function ensureGroups() {
+  const m = map();
+  if (!m) return false;
+  if (!overlaysGroup) overlaysGroup = L.layerGroup().addTo(m);
+  if (!textGroup) textGroup = L.layerGroup().addTo(m);
+  return true;
 }
+
+function bindOverlayEvents(layer) {
+  layer.on("click", (e) => {
+    if (active !== "select") return;
+    L.DomEvent.stopPropagation(e);
+    selectedOverlay = layer;
+    clearSelection();
+    hideFieldDetail();
+    showToast("Метка выбрана — Delete или Ctrl+Z");
+  });
+  // Delete removes exactly the mark under the cursor, whatever tool is active.
+  layer.on("mouseover", () => {
+    hoveredOverlay = layer;
+  });
+  layer.on("mouseout", () => {
+    if (hoveredOverlay === layer) hoveredOverlay = null;
+  });
+}
+
+function overlayParent(layer) {
+  return textGroup?.hasLayer(layer) ? textGroup : overlaysGroup;
+}
+
+function removeOverlay(layer) {
+  overlayParent(layer)?.removeLayer(layer);
+  overlays = overlays.filter((item) => item.layer !== layer);
+  if (hoveredOverlay === layer) hoveredOverlay = null;
+  if (selectedOverlay === layer) selectedOverlay = null;
+}
+
+function restoreOverlay(layer, parent) {
+  parent?.addLayer(layer);
+  overlays.push({ layer, parent });
+}
+
+function removeOverlayWithUndo(layer) {
+  const parent = overlayParent(layer);
+  removeOverlay(layer);
+  pushUndo({ undo: async () => restoreOverlay(layer, parent), redo: async () => removeOverlay(layer) });
+}
+
+/** Adds a finished ruler/compass/text mark (one undo step). */
+function registerOverlay(layers, parent = overlaysGroup) {
+  const list = layers.filter(Boolean);
+  // featureGroup forwards click/hover of every part (line, points, label) to the whole mark.
+  const stored = list.length > 1 ? L.featureGroup(list) : list[0];
+  bindOverlayEvents(stored);
+  restoreOverlay(stored, parent);
+  pushUndo({ undo: async () => removeOverlay(stored), redo: async () => restoreOverlay(stored, parent) });
+  return stored;
+}
+
+/* ---------------------------------------------------------------- ruler */
 
 function formatDist(meters) {
   return meters >= 1000 ? `${(meters / 1000).toFixed(2)} км` : `${Math.round(meters)} м`;
 }
 
-function finalizeRuler(a, b) {
-  clearScratch();
-  const group = L.layerGroup().addTo(map());
-  const color = coordColor();
-  L.circleMarker(a, { radius: 5, color, fillOpacity: 1 }).addTo(group);
-  L.circleMarker(b, { radius: 5, color, fillOpacity: 1 }).addTo(group);
-  L.polyline([a, b], { color, weight: 2 }).addTo(group);
-  const meters = map().distance(a, b);
-  L.tooltip({ permanent: true, direction: "center", className: "ruler-label" })
-    .setLatLng([(a.lat + b.lat) / 2, (a.lng + b.lng) / 2])
-    .setContent(formatDist(meters))
-    .addTo(group);
-  const step = tickStep(map().getZoom());
-  const n = Math.floor(meters / step);
-  for (let i = 1; i < n; i += 1) {
-    const t = (i * step) / meters;
-    const p = L.latLng(a.lat + (b.lat - a.lat) * t, a.lng + (b.lng - a.lng) * t);
-    L.circleMarker(p, { radius: 2, color, fillOpacity: 1 }).addTo(group);
-  }
-  annotations.push({ type: "ruler", layer: group });
-  preview = null;
-  scratch = group;
+function rulerTickStep() {
+  const zoom = map()?.getZoom() || 13;
+  if (zoom >= 17) return 10;
+  if (zoom >= 15) return 20;
+  if (zoom >= 13) return 50;
+  return 100;
 }
 
-function onCompassClick(e) {
-  const m = map();
-  if (!scratch) scratch = L.layerGroup().addTo(m);
-  if (!compassCenter) {
-    compassCenter = e.latlng;
-    L.circleMarker(e.latlng, { radius: 5, color: coordColor() }).addTo(scratch);
-    preview = L.circle(e.latlng, { radius: 1, color: coordColor(), dashArray: "6 4", fillOpacity: 0.08 }).addTo(m);
-    showToast("Кликните край окружности");
+function pointMark(latlng, fillOpacity = 1) {
+  const color = coordColor();
+  return L.circleMarker(latlng, { radius: display().pointSize, color, fillColor: color, fillOpacity, weight: 2 });
+}
+
+function labelMark(latlng, html) {
+  return L.marker(latlng, { icon: L.divIcon({ className: "ruler-label", html, iconSize: null }) });
+}
+
+function clearRulerPreview() {
+  map()?.off("mousemove", onRulerMove);
+  if (rulerPreview) overlaysGroup?.removeLayer(rulerPreview);
+  rulerPreview = null;
+  rulerStart = null;
+}
+
+function onRulerMove(e) {
+  if (!rulerPreview || !rulerStart) return;
+  const color = coordColor();
+  const cursor = e.latlng;
+  rulerPreview.clearLayers();
+  rulerPreview.addLayer(pointMark(rulerStart));
+  rulerPreview.addLayer(L.polyline([rulerStart, cursor], { color, weight: display().weight, dashArray: "6 4" }));
+  const mid = L.latLng((rulerStart.lat + cursor.lat) / 2, (rulerStart.lng + cursor.lng) / 2);
+  rulerPreview.addLayer(labelMark(mid, formatDist(rulerStart.distanceTo(cursor))));
+  rulerPreview.addLayer(pointMark(cursor, 0.85));
+}
+
+function handleRulerClick(e) {
+  if (!ensureGroups()) return;
+  if (!rulerStart) {
+    rulerStart = e.latlng;
+    rulerPreview = L.layerGroup([pointMark(e.latlng)]).addTo(overlaysGroup);
+    map().on("mousemove", onRulerMove);
     return;
   }
-  compassRadius = m.distance(compassCenter, e.latlng);
-  finalizeCompass(compassCenter, compassRadius);
+  const a = rulerStart;
+  const b = e.latlng;
+  clearRulerPreview();
+  const color = coordColor();
+  const distance = a.distanceTo(b);
+  const parts = [
+    pointMark(a),
+    pointMark(b),
+    L.polyline([a, b], { color, weight: display().weight, dashArray: "6 4" }),
+    labelMark(L.latLng((a.lat + b.lat) / 2, (a.lng + b.lng) / 2), formatDist(distance)),
+  ];
+  const step = rulerTickStep();
+  const count = Math.floor(distance / step);
+  for (let i = 1; i <= count; i += 1) {
+    const t = (i * step) / distance;
+    parts.push(pointMark(L.latLng(a.lat + (b.lat - a.lat) * t, a.lng + (b.lng - a.lng) * t)));
+  }
+  registerOverlay(parts);
+}
+
+/* ---------------------------------------------------------------- compass */
+
+function clearCompassPreview() {
+  if (compassPreview) overlaysGroup?.removeLayer(compassPreview);
+  compassPreview = null;
+}
+
+function clearCompassDrawing() {
+  map()?.off("mousemove", onCompassMove);
+  clearCompassPreview();
+  if (compassDraft) overlaysGroup?.removeLayer(compassDraft);
+  compassDraft = null;
   compassCenter = null;
 }
 
 function onCompassMove(e) {
-  if (!compassCenter || !preview) return;
-  const r = map().distance(compassCenter, e.latlng);
-  preview.setRadius(r);
-  preview.bindTooltip(`R = ${formatDist(r)}`, { permanent: true }).openTooltip(e.latlng);
+  if (!compassCenter) return;
+  const radius = compassCenter.distanceTo(e.latlng);
+  clearCompassPreview();
+  compassPreview = L.layerGroup([
+    L.circle(compassCenter, {
+      radius,
+      color: coordColor(),
+      weight: display().weight,
+      fillOpacity: 0.08,
+      dashArray: "4 4",
+      interactive: false,
+    }),
+    labelMark(e.latlng, `R = ${formatDist(radius)}`),
+  ]).addTo(overlaysGroup);
 }
 
-function finalizeCompass(center, radius) {
-  const group = L.layerGroup().addTo(map());
-  const color = coordColor();
-  L.circleMarker(center, { radius: 5, color }).addTo(group);
-  L.circle(center, { radius, color, fillOpacity: 0.08 }).addTo(group);
-  L.tooltip({ permanent: true })
-    .setLatLng(center)
-    .setContent(`R = ${formatDist(radius)}`)
-    .addTo(group);
-  annotations.push({ type: "compass", layer: group, center, radius });
-  clearScratch();
-  openAppModal({
-    title: "Циркуль",
-    bodyHtml: `<p>Радиус ${formatDist(radius)}</p>`,
-    actions: [
-      { label: "Закрыть", onClick: closeAppModal },
-      {
-        label: "+ Область по кругу",
-        className: "mini-btn mini-btn-blue",
-        onClick: async () => {
-          closeAppModal();
-          const poly = L.geoJSON(circlePolygon(center, radius));
-          const created = await persistDrawnLayer(poly.getLayers()[0]);
-          if (created) {
-            pushUndo({
-              undo: async () => {
-                await layersApi.deleteObject(created.id);
-                await loadMapData();
-              },
-              redo: async () => {
-                await persistDrawnLayer(poly.getLayers()[0]);
-              },
-            });
-          }
-        },
-      },
-      {
-        label: "Вырезать по кругу",
-        className: "mini-btn mini-btn-red",
-        onClick: async () => {
-          closeAppModal();
-          if (selected.length !== 1) {
-            showToast("Выделите один объект", true);
-            return;
-          }
-          await cutWithGeom(selected[0], circlePolygon(center, radius));
-        },
-      },
-    ],
-  });
-}
-
-function onTextClick(e) {
-  L.DomEvent.stop(e);
-  openAppModal({
-    title: "Текст на карте",
-    bodyHtml: `<div class="input-group"><label>ПОДПИСЬ</label><input id="map-text-input" class="search-input"></div>`,
-    actions: [
-      { label: "Отмена", onClick: closeAppModal },
-      {
-        label: "Добавить",
-        className: "mini-btn mini-btn-red",
-        onClick: () => {
-          const text = $("map-text-input")?.value?.trim();
-          closeAppModal();
-          if (!text) return;
-          const marker = L.marker(e.latlng, {
-            icon: L.divIcon({ className: "map-text-label", html: escapeHtml(text), iconSize: [0, 0] }),
-          }).addTo(map());
-          annotations.push({ type: "text", layer: marker });
-        },
-      },
-    ],
-  });
-  setTimeout(() => $("map-text-input")?.focus(), 50);
-}
-
-function isUiEvent(domEv) {
-  return !!domEv?.target?.closest?.(".more-menu, .sidebar-panel, .sidebar-icons, .topbar, #app-modal, button, input, select, textarea, a");
-}
-
-function brushWeightPx() {
-  const m = map();
-  const meters = brushMeters();
-  const c = m.getCenter();
-  const a = m.latLngToLayerPoint(c);
-  const b = m.latLngToLayerPoint(L.latLng(c.lat + meters / 111320, c.lng));
-  return Math.max(6, a.distanceTo(b));
-}
-
-function objectIdAt(latlng) {
-  if (!latlng) return null;
-  for (const rec of allObjectRecords()) {
-    if (geomContainsLatLng(rec.obj.geom, latlng)) return rec.obj.id;
+function handleCompassClick(e) {
+  if (!ensureGroups()) return;
+  if (!compassCenter) {
+    compassCenter = e.latlng;
+    compassDraft = L.layerGroup([pointMark(compassCenter)]).addTo(overlaysGroup);
+    map().on("mousemove", onCompassMove);
+    showToast("Укажите точку на окружности (радиус)");
+    return;
   }
-  return null;
+  const center = compassCenter;
+  const radius = center.distanceTo(e.latlng);
+  const centerParts = compassDraft ? compassDraft.getLayers() : [];
+  clearCompassDrawing();
+  registerOverlay([
+    ...centerParts,
+    L.circle(center, { radius, color: coordColor(), weight: display().weight, fillOpacity: 0.08 }),
+    pointMark(e.latlng),
+    labelMark(e.latlng, `R = ${formatDist(radius)}`),
+  ]);
+  lastCompassCircle = { center, radius };
+  openCompassActionPopup(e.latlng);
+  showToast(`Радиус: ${formatDist(radius)}`);
 }
 
-function onBrushDown(e) {
-  if (active !== "brush" && active !== "freehand" && active !== "eraser") return;
+function openCompassActionPopup(latlng) {
+  const box = document.createElement("div");
+  box.className = "compass-action-popup";
+  box.innerHTML = `<div class="compass-action-title">Круг циркуля</div>
+    <button type="button" class="mini-btn" data-act="area">+ Область по кругу</button>
+    <button type="button" class="mini-btn mini-btn-red" data-act="cut">Вырезать по кругу</button>`;
+  box.querySelector('[data-act="area"]').addEventListener("click", createAreaFromCompassCircle);
+  box.querySelector('[data-act="cut"]').addEventListener("click", eraseWithCompassCircle);
+  L.popup({ className: "compass-popup", maxWidth: 240 }).setLatLng(latlng).setContent(box).openOn(map());
+}
+
+function createAreaFromCompassCircle() {
+  if (!lastCompassCircle) return;
+  map()?.closePopup();
+  const layerId = currentDrawLayerId();
+  if (!layerId) {
+    showToast("Сначала выберите слой в панели рисования", true);
+    return;
+  }
+  const geom = circlePolygon(lastCompassCircle.center, lastCompassCircle.radius, 48);
+  queue(async () => {
+    await createTracked(layerId, geom);
+    showToast("Область создана по кругу циркуля");
+  });
+}
+
+function eraseWithCompassCircle() {
+  if (!lastCompassCircle) return;
+  // Checked at click time: the user often draws the circle first and selects the object after.
+  if (selected.length !== 1) {
+    showToast("Выделите один объект, чтобы вырезать из него круг", true);
+    return;
+  }
+  map()?.closePopup();
+  const id = selected[0];
+  const cutter = circlePolygon(lastCompassCircle.center, lastCompassCircle.radius, 48);
+  queue(async () => {
+    const record = getObjectRecord(id);
+    if (!record || isPointRecord(record)) {
+      showToast("Вырезать можно только из области", true);
+      return;
+    }
+    const before = record.obj.geom;
+    const cut = differenceGeom(before, cutter);
+    if (cut === undefined) {
+      showToast("Не удалось вырезать круг", true);
+      return;
+    }
+    const result = keepLargestPart(cut, { keepAllParts: polygonParts(before).length > 1 });
+    if (result.isEmpty) {
+      showToast("Круг стирает контур целиком — удалите объект вручную, если это нужно", true);
+      return;
+    }
+    await patchTracked(id, before, result.geom);
+    showToast(result.holes > holesOf(before) ? "Вырезано отверстие по кругу" : "Контур обрезан по кругу");
+  });
+}
+
+function holesOf(geom) {
+  return polygonParts(geom).reduce((n, p) => n + Math.max(0, p.length - 1), 0);
+}
+
+/* ---------------------------------------------------------------- text */
+
+function handleTextClick(e) {
+  const latlng = e.latlng;
+  const add = () => {
+    const text = $("modal-map-text")?.value.trim();
+    if (!text) return;
+    closeAppModal();
+    if (!ensureGroups()) return;
+    const marker = L.marker(latlng, {
+      icon: L.divIcon({ className: "map-text-label", html: escapeHtml(text), iconSize: null }),
+    });
+    registerOverlay([marker], textGroup);
+    showToast("Пометка добавлена");
+  };
+  openAppModal({
+    title: "Текстовая пометка",
+    bodyHtml: `<label class="modal-label" for="modal-map-text">Текст на карте</label>
+      <input type="text" id="modal-map-text" class="search-input modal-input" placeholder="Введите текст…" maxlength="200">`,
+    actions: [
+      { label: "Добавить", className: "mini-btn mini-btn-red", onClick: add },
+      { label: "Отмена", className: "mini-btn", onClick: closeAppModal },
+    ],
+  });
+  const input = $("modal-map-text");
+  input?.addEventListener("keydown", (ev) => {
+    if (ev.key === "Enter") {
+      ev.preventDefault();
+      add();
+    }
+  });
+  setTimeout(() => input?.focus(), 30);
+}
+
+/* ---------------------------------------------------------------- Delete */
+
+/** Delete / Backspace: mark under the cursor → selected objects (confirmed) → selected mark → last mark. */
+export async function deleteCurrentMapSelection() {
+  if (hoveredOverlay) {
+    removeOverlayWithUndo(hoveredOverlay);
+    showToast("Метка под курсором удалена");
+    return;
+  }
+  if (selected.length) {
+    await deleteSelectedFeatures();
+    return;
+  }
+  if (selectedOverlay) {
+    removeOverlayWithUndo(selectedOverlay);
+    showToast("Объект удалён");
+    return;
+  }
+  const last = overlays.at(-1);
+  if (last) {
+    removeOverlayWithUndo(last.layer);
+    showToast("Последняя метка удалена");
+    return;
+  }
+  showToast("Нечего удалить", true);
+}
+
+export async function deleteSelectedFeatures() {
+  const records = selected.map((id) => getObjectRecord(id)).filter(Boolean);
+  if (!records.length) return;
+  const names = records.map((r) => r.obj.name).filter(Boolean);
+  const ok = await confirmModal({
+    title: records.length === 1 ? "Удалить объект?" : "Удалить объекты?",
+    bodyHtml:
+      records.length === 1
+        ? `<p>Удалить «${escapeHtml(names[0] || "объект")}»? Действие можно отменить (Ctrl+Z).</p>`
+        : `<p>Будет удалено объектов: ${records.length}. Действие можно отменить (Ctrl+Z).</p>`,
+    confirmLabel: "Удалить",
+    danger: true,
+  });
+  if (!ok) return;
+  await queue(async () => {
+    clearSelection();
+    hideFieldDetail();
+    await deleteTracked(records);
+    showToast("Выделенные объекты удалены");
+  });
+}
+
+/* ---------------------------------------------------------------- merge */
+
+function announceSelection() {
+  document.dispatchEvent(new CustomEvent("av:selection", { detail: { ids: selected.slice() } }));
+}
+
+function updateMergeModePanel() {
+  announceSelection();
+  const panel = $("merge-mode-panel");
+  if (!panel) return;
+  panel.style.display = mergeActive ? "block" : "none";
+  $("merge-menu-item")?.classList.toggle("active", mergeActive);
+  const hint = $("merge-mode-hint");
+  if (hint) hint.textContent = `Выбрано: ${mergeActive ? selected.length : 0} из 2`;
+  const btn = $("merge-confirm-btn");
+  if (btn) btn.disabled = selected.length < 2;
+}
+
+function toggleMergeSelection(id) {
+  const record = getObjectRecord(id);
+  if (!record) return;
+  const idx = selected.indexOf(id);
+  if (idx >= 0) {
+    resetStyle(record);
+    selected.splice(idx, 1);
+  } else {
+    if (selected.length >= 2) {
+      showToast("За раз можно объединить только 2 области — сначала снимите одну", true);
+      return;
+    }
+    if (selected.length && getObjectRecord(selected[0])?.layer.id !== record.layer.id) {
+      showToast("Объединять можно только области одного слоя", true);
+      return;
+    }
+    selected.push(id);
+    applySelectedStyle(record);
+  }
+  clearVertexMarkers();
+  updateMergeModePanel();
+}
+
+export function startMergePolygonsMode() {
+  if (active === "freehand" || active === "polygon") cancelActiveTool({ silent: true });
+  clearSelection();
+  hideFieldDetail();
+  mergeActive = true;
+  setTool("select");
+  updateMergeModePanel();
+  showToast("Кликните по 2 областям одного слоя, затем «Объединить»");
+}
+
+export function cancelMergeMode() {
+  if (!mergeActive) return;
+  mergeActive = false;
+  clearSelection();
+  updateMergeModePanel();
+}
+
+function exitMergeModeKeepSelection() {
+  if (!mergeActive) return;
+  mergeActive = false;
+  updateMergeModePanel();
+}
+
+export function confirmMergePolygons() {
+  if (selected.length !== 2) return;
+  mergeSelectedPolygons();
+}
+
+/** Ctrl+M, as in the reference. */
+export function mergeHotkey() {
+  if (selected.length === 2) {
+    const [a, b] = selected.map((id) => getObjectRecord(id));
+    if (!a || !b || a.layer.id !== b.layer.id) showToast("Объединять можно только области одного слоя", true);
+    else mergeSelectedPolygons();
+  } else if (selected.length > 2) {
+    showToast("За раз можно объединить только 2 области", true);
+  } else {
+    showToast("Выделите ровно 2 объекта одного слоя (Ctrl/⌘/Shift + клик), затем Ctrl+M", true);
+  }
+}
+
+function mergeSelectedPolygons() {
+  const ids = selected.slice(0, 2);
+  queue(async () => {
+    const [a, b] = ids.map((id) => getObjectRecord(id));
+    if (!a || !b) return;
+    if (isPointRecord(a) || isPointRecord(b)) {
+      showToast("Точечные объекты нельзя объединять", true);
+      return;
+    }
+    let geom = unionGeom(a.obj.geom, b.obj.geom);
+    if (!geom) {
+      showToast("Не удалось объединить полигоны", true);
+      return;
+    }
+    let bridged = false;
+    // The areas did not touch: fill the space between them so the fields become one.
+    if (polygonParts(geom).length > polygonParts(a.obj.geom).length + polygonParts(b.obj.geom).length - 1) {
+      const withBridge = bridgePolygons(a.obj.geom, b.obj.geom);
+      if (withBridge && polygonParts(withBridge).length < polygonParts(geom).length) {
+        geom = withBridge;
+        bridged = true;
+      }
+    }
+    const keepAll = polygonParts(a.obj.geom).length > 1 || polygonParts(b.obj.geom).length > 1;
+    const result = keepLargestPart(geom, { keepAllParts: keepAll });
+    if (result.isEmpty) {
+      showToast("Не удалось объединить полигоны", true);
+      return;
+    }
+    clearSelection();
+    hideFieldDetail();
+    const merged = await mergeTracked(a, b, result.geom);
+    showToast(bridged ? "Объединено — пространство между областями заполнено" : "Выделенные полигоны объединены");
+    if (mergeActive) {
+      // The result becomes the first of the next pair — merge on without leaving the mode.
+      selected = [merged.id];
+      applySelectedStyle(getObjectRecord(merged.id));
+      updateMergeModePanel();
+      showToast("Выберите следующую область, чтобы объединить с ней");
+    } else {
+      selectFeature(merged.id, false);
+      showFieldDetail(getObjectRecord(merged.id));
+    }
+  });
+}
+
+/* ---------------------------------------------------------------- create / edit area (freehand) */
+
+function brushMeters() {
+  return parseInt($("brush-size")?.value || "20", 10);
+}
+
+function syncMenuItems() {
+  const drawing = active === "freehand" || active === "polygon";
+  $("create-area-item")?.classList.toggle("active", drawing && createSession && editDrawMode === "create");
+  $("polygon-area-item")?.classList.toggle("active", drawing && editDrawMode === "polygon");
+  $("edit-area-item")?.classList.toggle(
+    "active",
+    drawing && !createSession && (editDrawMode === "brush" || editDrawMode === "eraser"),
+  );
+  $("manual-connect-menu-item")?.classList.toggle("active", drawing && editDrawMode === "connect");
+}
+
+function showEditControls({ title, toggleRow = true }) {
+  const box = $("edit-area-controls");
+  if (box) box.style.display = "block";
+  const row = $("edit-mode-toggle-row");
+  if (row) row.style.display = toggleRow ? "" : "none";
+  if ($("paint-hud-title")) $("paint-hud-title").textContent = title;
+  $("more-menu")?.classList.add("active");
+}
+
+function setEraserEnabled(enabled) {
+  const btn = $("edit-eraser-btn");
+  if (!btn) return;
+  btn.disabled = !enabled;
+  btn.title = enabled ? "" : "Ластик редактирует уже существующий объект — сначала завершите создание";
+}
+
+function syncModeButtons(mode) {
+  $("edit-brush-btn")?.classList.toggle("active", mode === "brush" || mode === "create");
+  $("edit-eraser-btn")?.classList.toggle("active", mode === "eraser");
+  $("edit-polygon-btn")?.classList.toggle("active", mode === "polygon");
+  const hint = $("paint-hud-hint");
+  if (hint) {
+    hint.textContent =
+      mode === "eraser"
+        ? "Проведите ластиком по краю выделенного объекта. Замкнутый обвод вырезает всю область внутри."
+        : mode === "polygon"
+          ? "Кликайте вершины. Зелёная точка, Enter или двойной клик — замкнуть. Esc — отмена."
+          : mode === "connect"
+            ? "Проведите линию от одной области к другой (того же слоя) — они соединятся по линии."
+            : createSession
+              ? "Обведите область кистью — контур замкнётся сам. Каждый штрих — отдельный объект."
+              : "Проведите кистью от края выделенного объекта, чтобы расширить его.";
+  }
+}
+
+function preferredDrawLayer() {
+  populateDrawLayerSelect();
+  const sel = $("draw-layer-select");
+  const layerId = currentDrawLayerId();
+  if (sel && layerId) sel.value = layerId;
+  return layerId;
+}
+
+export function startCreateArea() {
+  exitMergeModeKeepSelection();
+  if (active === "freehand" || active === "polygon") deactivateCurrentTool();
+  clearSelection();
+  hideFieldDetail();
+  createSession = true;
+  preferredDrawLayer();
+  showEditControls({ title: "Создание области" });
+  setEraserEnabled(false);
+  setEditDrawMode("brush");
+  showToast("Создание: обведите область кистью. Каждый штрих — объект. «Готово» — выход.");
+}
+
+/** «Полигон по точкам» — backend version only, kept. */
+export function startPolygonMode() {
+  exitMergeModeKeepSelection();
+  if (active === "freehand" || active === "polygon") deactivateCurrentTool();
+  clearSelection();
+  hideFieldDetail();
+  createSession = true;
+  preferredDrawLayer();
+  showEditControls({ title: "Полигон по точкам" });
+  setEraserEnabled(false);
+  setEditDrawMode("polygon");
+  showToast("Кликайте вершины. На концах отрезков — точки. Зелёная замыкает.");
+}
+
+export function openEditAreaMode() {
+  if (selected.length !== 1) {
+    showToast("Выделите одну область для редактирования (или создайте новую через «Создать область»).", true);
+    return;
+  }
+  exitMergeModeKeepSelection();
+  createSession = false;
+  const record = getObjectRecord(selected[0]);
+  populateDrawLayerSelect();
+  const sel = $("draw-layer-select");
+  if (sel && record) sel.value = record.layer.id;
+  const name = record?.obj.name;
+  showEditControls({ title: name ? `Редактирование: «${name}»` : "Редактирование" });
+  setEraserEnabled(true);
+  setEditDrawMode("brush");
+  showToast("Редактирование: кисть расширяет, ластик подрезает край. «Готово» — выход.");
+}
+
+/** «Соединить линией»: a line from one area to another (same layer) joins them along the line. */
+export function startManualConnectMode() {
+  if (active === "freehand" || active === "polygon") deactivateCurrentTool();
+  exitMergeModeKeepSelection();
+  clearSelection();
+  hideFieldDetail();
+  createSession = false;
+  preferredDrawLayer();
+  showEditControls({ title: "Соединение линией", toggleRow: false });
+  editDrawMode = "connect";
+  syncModeButtons("connect");
+  startFreehandEdit("connect");
+  showToast("Проведите линию от одной области к другой (или от края уже готовой) — они соединятся. «Готово» — выход.");
+}
+
+export function setEditDrawMode(mode) {
+  let next = mode;
+  // While creating there is nothing to erase yet: the brush stays «create».
+  if (createSession && mode !== "polygon") next = "create";
+  if (mode === "eraser" && createSession) next = "create";
+  syncModeButtons(next);
+  if (next === "polygon") startPolygonDrawing();
+  else startFreehandEdit(next);
+}
+
+export function finishEditAreaMode() {
+  if (active === "polygon" && vertexPts.length >= 3) finishPolygonDraw({ stay: true });
+  createSession = false;
+  stopFreehandEdit();
+  clearPolygonDraft();
+  const box = $("edit-area-controls");
+  if (box) box.style.display = "none";
+  setEraserEnabled(true);
+  setTool("select");
+}
+
+function startFreehandEdit(mode) {
+  const m = map();
+  if (!m) {
+    showToast("Карта ещё не готова", true);
+    return;
+  }
+  if (!ensureGroups()) return;
+  stopFreehandEdit();
+  clearPolygonDraft();
+  active = "freehand";
+  editDrawMode = mode;
+  const mapArea = $("map-area");
+  mapArea?.classList.remove("tool-select", "tool-ruler", "tool-compass", "tool-text", "tool-polygon");
+  mapArea?.classList.add("tool-freehand");
+  mapArea?.classList.toggle("tool-eraser", mode === "eraser");
+  mapArea?.classList.toggle("tool-brush", mode !== "eraser");
+  document.querySelectorAll(".tool-btn[data-tool]").forEach((btn) => btn.classList.remove("active"));
+  m.dragging.disable();
+  m.on("mousedown", onFreehandDown);
+  document.addEventListener("mousemove", onFreehandDocMove);
+  document.addEventListener("mouseup", onFreehandUp);
+  syncMenuItems();
+  showToast(
+    mode === "eraser"
+      ? "Ластик: проведите по краю объекта"
+      : mode === "connect"
+        ? "Проведите линию между областями"
+        : createSession
+          ? "Обведите область кистью, затем «Готово»"
+          : "Кисть: проведите рядом с объектом, чтобы расширить",
+  );
+}
+
+function stopFreehandEdit() {
+  freehandActive = false;
+  freehandPath = [];
+  if (freehandPreview) overlaysGroup?.removeLayer(freehandPreview);
+  freehandPreview = null;
+  if (brushCursor) overlaysGroup?.removeLayer(brushCursor);
+  brushCursor = null;
+  brushCursorMeta = { radius: null, isEraser: null };
+  const m = map();
+  if (m) {
+    m.off("mousedown", onFreehandDown);
+    m.dragging.enable();
+  }
+  document.removeEventListener("mousemove", onFreehandDocMove);
+  document.removeEventListener("mouseup", onFreehandUp);
+}
+
+function updateBrushCursor(latlng) {
+  if (active !== "freehand" || !overlaysGroup || !latlng) return;
+  const radius = Math.max(0.8, brushMeters() / 2);
+  const isEraser = editDrawMode === "eraser";
+  if (brushCursor && brushCursorMeta.isEraser === isEraser) {
+    brushCursor.setLatLng(latlng);
+    if (brushCursorMeta.radius !== radius) {
+      brushCursor.setRadius(radius);
+      brushCursorMeta.radius = radius;
+    }
+    return;
+  }
+  if (brushCursor) overlaysGroup.removeLayer(brushCursor);
+  brushCursor = L.circle(latlng, {
+    radius,
+    color: isEraser ? "#e14059" : "#3388ff",
+    weight: 1.5,
+    dashArray: isEraser ? "2 3" : null,
+    fillColor: isEraser ? "#e14059" : "#3388ff",
+    fillOpacity: isEraser ? 0.12 : 0.08,
+    interactive: false,
+  });
+  overlaysGroup.addLayer(brushCursor);
+  brushCursorMeta = { radius, isEraser };
+}
+
+function onFreehandDown(e) {
+  if (active !== "freehand" || !e.latlng) return;
   const oe = e.originalEvent;
-  if (!oe || oe.button !== 0) return;
-  if (isUiEvent(oe)) return;
-  if (!e.latlng) return;
-  oe.preventDefault?.();
-  drawing = true;
-  brushPts = [e.latlng];
-  map().dragging.disable();
-  clearScratch();
-  const erasing = active === "eraser" || editMode === "eraser";
-  scratch = L.polyline(brushPts, {
-    color: erasing ? "#0f172a" : "#e14059",
-    weight: brushWeightPx(),
-    opacity: 0.45,
+  if (oe && oe.button !== 0) return;
+  if (oe) {
+    L.DomEvent.stopPropagation(oe);
+    L.DomEvent.preventDefault(oe);
+  }
+  freehandTargetId = null;
+  if (!createSession && (editDrawMode === "brush" || editDrawMode === "eraser")) {
+    if (selected.length !== 1) {
+      showToast("Выделите один объект для редактирования", true);
+      return;
+    }
+    const record = getObjectRecord(selected[0]);
+    if (isPointRecord(record)) {
+      showToast("Кисть и ластик работают только с областями", true);
+      return;
+    }
+    freehandTargetId = selected[0];
+  }
+  freehandActive = true;
+  freehandPath = [e.latlng];
+  updateBrushCursor(e.latlng);
+}
+
+function onFreehandDocMove(ev) {
+  const m = map();
+  if (active !== "freehand" || !m) return;
+  let latlng;
+  try {
+    latlng = m.mouseEventToLatLng(ev);
+  } catch {
+    return;
+  }
+  if (!latlng) return;
+  updateBrushCursor(latlng);
+  if (!freehandActive) return;
+  const last = freehandPath.at(-1);
+  if (last && m.latLngToContainerPoint(last).distanceTo(m.latLngToContainerPoint(latlng)) < 1.5) return;
+  freehandPath.push(latlng);
+  updateFreehandPreview();
+}
+
+function onFreehandUp() {
+  if (!freehandActive) return;
+  freehandActive = false;
+  if (freehandPreview) overlaysGroup?.removeLayer(freehandPreview);
+  freehandPreview = null;
+  const path = freehandPath;
+  const mode = editDrawMode;
+  const targetId = freehandTargetId;
+  freehandPath = [];
+  freehandTargetId = null;
+  if (path.length >= 2) queue(() => applyFreehandStroke(path, mode, targetId));
+}
+
+function updateFreehandPreview() {
+  if (freehandPath.length < 2) return;
+  if (freehandPreview) {
+    freehandPreview.setLatLngs(freehandPath);
+    return;
+  }
+  const isEraser = editDrawMode === "eraser";
+  freehandPreview = L.polyline(freehandPath, {
+    color: isEraser ? "#e14059" : coordColor(),
+    weight: isEraser
+      ? Math.max(2, Math.min(16, brushMeters() / 3))
+      : Math.max(2, Math.min(6, (display().weight || 2) + 1)),
+    opacity: 0.9,
     lineCap: "round",
     lineJoin: "round",
+    dashArray: isEraser ? "5 4" : "4 4",
     interactive: false,
-  }).addTo(map());
-}
-
-function onBrushMove(e) {
-  if (!drawing || !scratch || !e.latlng) return;
-  const last = brushPts.at(-1);
-  const pt = map().latLngToLayerPoint(e.latlng);
-  const prev = map().latLngToLayerPoint(last);
-  if (pt.distanceTo(prev) < 1.5) return;
-  brushPts.push(e.latlng);
-  scratch.setLatLngs(brushPts);
-  const erasing = active === "eraser" || editMode === "eraser";
-  scratch.setStyle({
-    color: isClosedStroke(brushPts, map()) ? "#22c55e" : erasing ? "#0f172a" : "#e14059",
   });
+  overlaysGroup.addLayer(freehandPreview);
 }
 
-async function onBrushUp() {
-  if (!drawing) return;
-  drawing = false;
-  if (active !== "brush" && active !== "freehand" && active !== "eraser") return;
-  try {
-    const m = map();
-    const pts = simplifyLatLngs(brushPts, m, 3);
-    const travel = strokeLengthPx(pts, m);
-    clearScratch();
-    if (travel < 8 && pts.length < 3) {
-      showToast("Проведите штрих по карте (клик без движения не рисует)");
+/** Visible polygon objects of a layer near a point (inside, or within `tolM` of the edge). */
+function findRecordNear(layerId, latlng, tolM) {
+  let best = null;
+  let bestDist = Infinity;
+  allObjectRecords().forEach((record) => {
+    if (record.layer.id !== layerId || !isRecordVisible(record) || isPointRecord(record)) return;
+    const d = distanceToGeomM(record.obj.geom, latlng);
+    if (d <= tolM && d < bestDist) {
+      best = record;
+      bestDist = d;
+    }
+  });
+  return best;
+}
+
+async function applyFreehandStroke(path, mode, targetId) {
+  const radius = Math.max(1, brushMeters() / 2);
+  const layerId = currentDrawLayerId();
+  if (!layerId || !getLayer(layerId)) {
+    showToast("Выберите слой", true);
+    return;
+  }
+
+  if (mode === "create") {
+    // The outline always closes end-to-start, like drawing a shape by hand.
+    let result = null;
+    const outline = outlinePolygonGeom(path);
+    if (outline) result = keepLargestPart(outline);
+    if (!result || result.isEmpty || geodesicAreaM2(result.geom) < 1) {
+      const buffer = strokeBufferGeom(path, radius);
+      result = buffer ? keepLargestPart(buffer) : null;
+    }
+    if (!result || result.isEmpty) {
+      showToast("Проведите дольше, чтобы создать область", true);
       return;
     }
-    const closed = isClosedStroke(pts, m);
-    const geom = closed ? polygonFromLatLngs(pts) : bufferStroke(pts, brushMeters());
-    if (!geom) {
-      showToast("Не удалось построить контур", true);
+    await createTracked(layerId, result.geom);
+    showToast("Контур применён");
+    return;
+  }
+
+  const strokeBuf = strokeBufferGeom(path, radius);
+  if (!strokeBuf) {
+    showToast("Проведите дольше, чтобы применить инструмент", true);
+    return;
+  }
+
+  if (mode === "connect") {
+    const tolM = Math.max(radius, 5);
+    const start = findRecordNear(layerId, path[0], tolM);
+    const end = findRecordNear(layerId, path.at(-1), tolM);
+    if (!start && !end) {
+      showToast("Начните или закончите линию на объекте выбранного слоя", true);
       return;
     }
-    const erasing = active === "eraser" || editMode === "eraser";
-    if (erasing) {
-      const targetId = selected.length === 1 ? selected[0] : objectIdAt(pts[0]) || objectIdAt(pts.at(-1));
-      if (!targetId) {
-        showToast("Проведите ластиком по области (или сначала выделите её)", true);
+    if (start && end && start.obj.id !== end.obj.id) {
+      const joined = unionGeom(unionGeom(start.obj.geom, end.obj.geom), strokeBuf);
+      const keepAll = polygonParts(start.obj.geom).length > 1 || polygonParts(end.obj.geom).length > 1;
+      const result = joined ? keepLargestPart(joined, { keepAllParts: keepAll }) : null;
+      if (!result || result.isEmpty) {
+        showToast("Не удалось соединить области", true);
         return;
       }
-      await cutWithGeom(targetId, geom);
+      clearSelection();
+      hideFieldDetail();
+      await mergeTracked(start, end, result.geom);
+      showToast("Области соединены по нарисованной линии");
       return;
     }
-    if (paintIntent === "edit" && selected.length === 1) {
-      await unionWithGeom(selected[0], geom);
+    const target = start || end;
+    const extended = unionGeom(target.obj.geom, strokeBuf);
+    const result = extended
+      ? keepLargestPart(extended, { keepAllParts: polygonParts(target.obj.geom).length > 1 })
+      : null;
+    if (!result || result.isEmpty) {
+      showToast("Не удалось дорисовать соединение", true);
       return;
     }
-    const layer = L.geoJSON(geom);
-    const created = await persistDrawnLayer(layer.getLayers()[0]);
-    if (created) {
-      pushUndo({
-        undo: async () => {
-          await layersApi.deleteObject(created.id);
-          await loadMapData();
-        },
-        redo: async () => persistDrawnLayer(layer.getLayers()[0]),
-      });
+    await patchTracked(target.obj.id, target.obj.geom, result.geom);
+    showToast("Соединение дорисовано");
+    return;
+  }
+
+  const record = getObjectRecord(targetId);
+  if (!record) {
+    showToast("Выделите один объект — инструмент работает только с ним", true);
+    return;
+  }
+  const before = record.obj.geom;
+  const keepAllParts = polygonParts(before).length > 1;
+
+  if (mode === "eraser") {
+    // A closed loop (lasso) removes everything inside it, not only a strip along the line.
+    let cutter = strokeBuf;
+    if (isLoopClosedM(path, radius)) {
+      const loop = outlinePolygonGeom(path);
+      if (loop) cutter = unionGeom(loop, strokeBuf) || strokeBuf;
     }
-  } catch (err) {
-    showToast(err.message || "Не удалось применить штрих", true);
+    const cut = differenceGeom(before, cutter);
+    if (cut === undefined) {
+      showToast("Не удалось изменить контур — попробуйте провести иначе", true);
+      return;
+    }
+    const result = keepLargestPart(cut, { keepAllParts });
+    if (result.isEmpty) {
+      showToast("Ластик стирает контур целиком — удалите объект вручную, если это нужно", true);
+      return;
+    }
+    await patchTracked(record.obj.id, before, result.geom);
+    showToast(
+      result.holes > holesOf(before)
+        ? "В контуре вырезано отверстие"
+        : result.discarded
+          ? "Контур скорректирован (оставлена самая крупная часть)"
+          : "Контур скорректирован",
+    );
+    return;
   }
+
+  // brush: extend the selected object
+  const unioned = unionGeom(before, strokeBuf);
+  const result = unioned ? keepLargestPart(unioned, { keepAllParts }) : null;
+  if (!result || result.isEmpty) {
+    showToast("Не удалось расширить область — попробуйте провести иначе", true);
+    return;
+  }
+  await patchTracked(record.obj.id, before, result.geom);
+  showToast("Область расширена");
 }
 
-async function unionWithGeom(objectId, extra) {
-  const rec = getObjectRecord(objectId);
-  if (!rec) return;
-  const prev = rec.obj.geom;
-  const next = unionGeom(prev, extra);
-  if (!next) {
-    showToast("Операция уничтожила контур — отменена", true);
-    return;
-  }
-  await patchObjectGeom(objectId, next);
-  pushUndo({
-    undo: () => patchObjectGeom(objectId, prev),
-    redo: () => patchObjectGeom(objectId, next),
-  });
-}
-
-async function cutWithGeom(objectId, cutter) {
-  const rec = getObjectRecord(objectId);
-  if (!rec) return;
-  const prev = rec.obj.geom;
-  const next = diffGeom(prev, cutter);
-  if (!next) {
-    showToast("Операция уничтожила контур — отменена", true);
-    return;
-  }
-  await patchObjectGeom(objectId, next);
-  pushUndo({
-    undo: () => patchObjectGeom(objectId, prev),
-    redo: () => patchObjectGeom(objectId, next),
-  });
-}
-
-export async function mergeSelectedPair() {
-  const ids = mergePicks.length === 2 ? mergePicks : selected;
-  if (ids.length !== 2) {
-    showToast("За раз можно объединить только 2 области", true);
-    return;
-  }
-  const a = getObjectRecord(ids[0]);
-  const b = getObjectRecord(ids[1]);
-  if (!a || !b) return;
-  if (a.obj.layer_id !== b.obj.layer_id) {
-    showToast("Объединять можно только области одного слоя", true);
-    return;
-  }
-  try {
-    let geom = unionGeom(a.obj.geom, b.obj.geom);
-    const multi = geom?.type === "MultiPolygon";
-    if (multi) geom = bridgePolygons(a.obj.geom, b.obj.geom);
-    const merged = await layersApi.mergeObjects([a.obj.id, b.obj.id], geom);
-    showToast("Объекты объединены");
-    await loadMapData();
-    if (merged?.id) setSelection([merged.id]);
-    pushUndo({
-      undo: async () => {
-        showToast("Отмена объединения: восстановите объекты через историю, если нужно");
-      },
-      redo: async () => {},
-    });
-  } catch (err) {
-    showToast(err.message, true);
-  }
-}
+/* ---------------------------------------------------------------- polygon by vertices */
 
 function vertexDot(latlng, isFirst) {
   return L.circleMarker(latlng, {
@@ -517,10 +1301,9 @@ function vertexDot(latlng, isFirst) {
 }
 
 function redrawVertexPreview(cursor) {
-  const m = map();
-  if (!m) return;
-  if (!scratch) scratch = L.layerGroup().addTo(m);
-  scratch.clearLayers();
+  if (!ensureGroups()) return;
+  if (!vertexScratch) vertexScratch = L.layerGroup().addTo(overlaysGroup);
+  vertexScratch.clearLayers();
   if (vertexPts.length >= 3) {
     L.polygon([...vertexPts, vertexPts[0]], {
       color: "#e14059",
@@ -529,38 +1312,57 @@ function redrawVertexPreview(cursor) {
       fillOpacity: 0.12,
       dashArray: "4 4",
       interactive: false,
-    }).addTo(scratch);
+    }).addTo(vertexScratch);
   }
-  if (vertexPts.length >= 2) {
-    L.polyline(vertexPts, { color: "#e14059", weight: 3, interactive: false }).addTo(scratch);
-  }
+  if (vertexPts.length >= 2) L.polyline(vertexPts, { color: "#e14059", weight: 3, interactive: false }).addTo(vertexScratch);
   if (cursor && vertexPts.length) {
-    L.polyline([vertexPts.at(-1), cursor], {
-      color: "#fb7185",
-      weight: 2,
-      dashArray: "6 4",
-      interactive: false,
-    }).addTo(scratch);
+    L.polyline([vertexPts.at(-1), cursor], { color: "#fb7185", weight: 2, dashArray: "6 4", interactive: false }).addTo(
+      vertexScratch,
+    );
   }
-  vertexPts.forEach((p, i) => vertexDot(p, i === 0).addTo(scratch));
+  vertexPts.forEach((p, i) => vertexDot(p, i === 0).addTo(vertexScratch));
 }
 
-function onPolygonClick(e) {
-  L.DomEvent.stop(e);
-  if (!e.latlng) return;
-  if (isUiEvent(e.originalEvent)) return;
+function clearPolygonDraft() {
+  vertexPts = [];
+  if (vertexScratch) overlaysGroup?.removeLayer(vertexScratch);
+  vertexScratch = null;
+  const m = map();
+  m?.off("mousemove", onPolygonMove);
+  m?.off("dblclick", onPolygonDblClick);
+  m?.doubleClickZoom?.enable();
+}
+
+function startPolygonDrawing() {
+  const m = map();
+  if (!m || !ensureGroups()) return;
+  stopFreehandEdit();
+  clearPolygonDraft();
+  active = "polygon";
+  editDrawMode = "polygon";
+  const mapArea = $("map-area");
+  mapArea?.classList.remove("tool-select", "tool-ruler", "tool-compass", "tool-text", "tool-freehand", "tool-eraser", "tool-brush");
+  mapArea?.classList.add("tool-polygon");
+  document.querySelectorAll(".tool-btn[data-tool]").forEach((btn) => btn.classList.remove("active"));
+  m.doubleClickZoom?.disable();
+  m.on("mousemove", onPolygonMove);
+  m.on("dblclick", onPolygonDblClick);
+  syncMenuItems();
+}
+
+function handlePolygonClick(e) {
+  const m = map();
+  if (!e.latlng || !m) return;
   if (vertexPts.length >= 3) {
-    const first = map().latLngToLayerPoint(vertexPts[0]);
-    const cur = map().latLngToLayerPoint(e.latlng);
-    if (first.distanceTo(cur) <= 16) {
+    const first = m.latLngToLayerPoint(vertexPts[0]);
+    if (first.distanceTo(m.latLngToLayerPoint(e.latlng)) <= 16) {
       finishPolygonDraw({ stay: true });
       return;
     }
   }
   if (vertexPts.length) {
-    const last = map().latLngToLayerPoint(vertexPts.at(-1));
-    const cur = map().latLngToLayerPoint(e.latlng);
-    if (last.distanceTo(cur) < 4) return;
+    const last = m.latLngToLayerPoint(vertexPts.at(-1));
+    if (last.distanceTo(m.latLngToLayerPoint(e.latlng)) < 4) return;
   }
   vertexPts.push(e.latlng);
   redrawVertexPreview();
@@ -573,16 +1375,18 @@ function onPolygonMove(e) {
 }
 
 function onPolygonDblClick(e) {
-  L.DomEvent.stop(e);
-  if (vertexPts.length >= 2) {
-    const last = map().latLngToLayerPoint(vertexPts.at(-1));
-    const prev = map().latLngToLayerPoint(vertexPts.at(-2));
+  L.DomEvent.stopPropagation(e);
+  const m = map();
+  if (m && vertexPts.length >= 2) {
+    const last = m.latLngToLayerPoint(vertexPts.at(-1));
+    const prev = m.latLngToLayerPoint(vertexPts.at(-2));
     if (last.distanceTo(prev) <= 10) vertexPts.pop();
   }
   finishPolygonDraw({ stay: true });
 }
 
-export async function finishPolygonDraw({ stay = true } = {}) {
+/** Enter / double click / green point / «Готово»: saves the drawn polygon. */
+export function finishPolygonDraw({ stay = true } = {}) {
   if (active !== "polygon") return false;
   if (vertexPts.length < 3) {
     showToast("Нужно минимум 3 точки", true);
@@ -590,254 +1394,197 @@ export async function finishPolygonDraw({ stay = true } = {}) {
   }
   const geom = polygonFromLatLngs(vertexPts);
   vertexPts = [];
-  clearScratch();
-  if (paintIntent === "edit" && selected.length === 1) {
-    await unionWithGeom(selected[0], geom);
-    showToast("Контур добавлен к области");
-    if (!stay) setTool("select");
-    else redrawVertexPreview();
-    return true;
-  }
-  const layer = L.geoJSON(geom);
-  const created = await persistDrawnLayer(layer.getLayers()[0]);
-  if (created) {
-    pushUndo({
-      undo: async () => {
-        await layersApi.deleteObject(created.id);
-        await loadMapData();
-      },
-      redo: async () => persistDrawnLayer(layer.getLayers()[0]),
-    });
-  }
-  showToast("Область создана — кликайте, чтобы начать следующую");
+  redrawVertexPreview();
+  const editId = !createSession && selected.length === 1 ? selected[0] : null;
+  const layerId = currentDrawLayerId();
+  queue(async () => {
+    if (editId) {
+      const record = getObjectRecord(editId);
+      if (!record) return;
+      const unioned = unionGeom(record.obj.geom, geom);
+      const result = unioned
+        ? keepLargestPart(unioned, { keepAllParts: polygonParts(record.obj.geom).length > 1 })
+        : null;
+      if (!result || result.isEmpty) {
+        showToast("Операция уничтожила контур — отменена", true);
+        return;
+      }
+      await patchTracked(editId, record.obj.geom, result.geom);
+      showToast("Контур добавлен к области");
+      return;
+    }
+    if (!layerId) {
+      showToast("Создайте слой для рисования", true);
+      return;
+    }
+    await createTracked(layerId, geom);
+    showToast(stay ? "Область создана — кликайте, чтобы начать следующую" : "Область создана");
+  });
   if (!stay) setTool("select");
   return true;
 }
 
-export function setPaintIntent(intent) {
-  paintIntent = intent === "edit" ? "edit" : "create";
-}
+/* ---------------------------------------------------------------- draw layer select */
 
-export function startPolygonMode() {
-  populateDrawLayerSelect();
-  $("edit-area-controls").style.display = "block";
-  $("merge-mode-panel").style.display = "none";
-  $("more-menu")?.classList.add("active");
-  $("polygon-area-item")?.classList.add("active");
-  $("create-area-item")?.classList.remove("active");
-  $("edit-area-item")?.classList.remove("active");
-  $("merge-menu-item")?.classList.remove("active");
-  vertexPts = [];
-  setPaintIntent("create");
-  setEditDrawMode("polygon");
-  showToast("Кликайте вершины. На концах отрезков — точки. Зелёная замыкает.");
-}
-
-export function startMergeMode() {
-  mergePicks = [];
-  $("merge-mode-panel").style.display = "block";
-  $("edit-area-controls").style.display = "none";
-  $("merge-mode-hint").textContent = "Выбрано: 0 из 2";
-  $("merge-confirm-btn").disabled = true;
-  $("more-menu")?.classList.add("active");
-  setTool("merge");
-}
-
-function onMergeClick(e) {
-  L.DomEvent.stop(e);
-  const obj = findPart(e)?.avObject;
-  if (!obj) return;
-  if (mergePicks.includes(obj.id)) return;
-  if (mergePicks.length >= 2) {
-    showToast("За раз можно объединить только 2 области — сначала снимите одну", true);
-    return;
-  }
-  if (mergePicks.length) {
-    const first = getObjectRecord(mergePicks[0]);
-    if (first && first.obj.layer_id !== obj.layer_id) {
-      showToast("Объединять можно только области одного слоя", true);
-      return;
-    }
-  }
-  mergePicks.push(obj.id);
-  $("merge-mode-hint").textContent = `Выбрано: ${mergePicks.length} из 2`;
-  $("merge-confirm-btn").disabled = mergePicks.length < 2;
-}
-
-export function cancelMergeMode() {
-  mergePicks = [];
-  $("merge-mode-panel").style.display = "none";
-  $("merge-confirm-btn").disabled = true;
-  setTool("select");
-}
-
-export function openEditAreaMode() {
-  if (selected.length !== 1) {
-    showToast("Сначала выберите одну область инструментом «Выделить»", true);
-    return;
-  }
-  $("edit-area-controls").style.display = "block";
-  $("merge-mode-panel").style.display = "none";
-  $("more-menu")?.classList.add("active");
-  $("edit-area-item")?.classList.add("active");
-  $("create-area-item")?.classList.remove("active");
-  $("polygon-area-item")?.classList.remove("active");
-  $("merge-menu-item")?.classList.remove("active");
-  populateDrawLayerSelect();
-  setPaintIntent("edit");
-  setEditDrawMode("brush");
-}
-
-export async function finishEditAreaMode() {
-  if (active === "polygon" && vertexPts.length >= 3) {
-    await finishPolygonDraw({ stay: false });
-  }
-  $("edit-area-controls").style.display = "none";
-  $("create-area-item")?.classList.remove("active");
-  $("polygon-area-item")?.classList.remove("active");
-  $("edit-area-item")?.classList.remove("active");
-  setPaintIntent("create");
-  setTool("select");
-}
-
-function updatePaintHud() {
-  const titles = { brush: "Кисть", eraser: "Ластик", polygon: "Полигон по точкам" };
-  if ($("paint-hud-title")) $("paint-hud-title").textContent = titles[editMode] || "Рисование";
-  if ($("paint-hud-hint")) $("paint-hud-hint").textContent = DRAW_HINTS[editMode] || "";
-  $("edit-brush-btn")?.classList.toggle("active", editMode === "brush");
-  $("edit-eraser-btn")?.classList.toggle("active", editMode === "eraser");
-  $("edit-polygon-btn")?.classList.toggle("active", editMode === "polygon");
-}
-
-export function setEditDrawMode(mode) {
-  editMode = mode;
-  updatePaintHud();
-  if (mode === "polygon") {
-    $("polygon-area-item")?.classList.add("active");
-    $("create-area-item")?.classList.remove("active");
-  } else if (paintIntent === "create") {
-    $("create-area-item")?.classList.add("active");
-    $("polygon-area-item")?.classList.remove("active");
-  }
-  setTool(mode === "eraser" ? "eraser" : mode === "polygon" ? "polygon" : "brush");
-}
-
-export async function deleteAtPriority() {
-  const hoverAnn = annotations.find((item) => item.layer?._map && item.layer.getBounds?.()?.contains?.(map().getCenter()));
-  const under = annotations.find((item) => {
-    try {
-      return item.layer.getElement?.() && item.layer._icon;
-    } catch {
-      return false;
-    }
-  });
-  // Spec 6.2 / test 43: Delete removes the selected objects; only when nothing is selected
-  // does it fall back to the map annotations. (Deleting whatever the mouse last passed
-  // over removed objects the user never selected.)
-  if (selected.length) {
-    const recs = selected.map((id) => getObjectRecord(id)).filter(Boolean);
-    await Promise.all(recs.map((rec) => layersApi.deleteObject(rec.obj.id)));
-    setSelection([]);
-    await loadMapData();
-    let restored = [];
-    pushUndo({
-      // Restore into the original layer with the original name, not into the draw layer.
-      undo: async () => {
-        restored = await Promise.all(
-          recs.map((rec) =>
-            layersApi.addObject(rec.layer.id, {
-              name: rec.obj.name || "",
-              geom: rec.obj.geom,
-              origin: rec.obj.origin || "manual",
-            }),
-          ),
-        );
-        await loadMapData();
-      },
-      redo: async () => {
-        await Promise.all(restored.map((obj) => layersApi.deleteObject(obj.id)));
-        await loadMapData();
-      },
+/** «Слой» in the drawing panel: «+ Новый слой…», target layer while creating, move of the edited object. */
+export function onDrawLayerSelect(value) {
+  if (value === "__new__") {
+    openAppModal({
+      title: "Новый слой",
+      bodyHtml: `<label class="modal-label" for="modal-new-layer-name">Название</label>
+        <input type="text" id="modal-new-layer-name" class="search-input modal-input" value="Новый слой" maxlength="120">`,
+      actions: [
+        {
+          label: "Создать",
+          className: "mini-btn mini-btn-red",
+          onClick: async () => {
+            const name = $("modal-new-layer-name")?.value.trim();
+            if (!name) return;
+            closeAppModal();
+            try {
+              const created = await createLayerQuick(name);
+              populateDrawLayerSelect();
+              const sel = $("draw-layer-select");
+              if (sel) sel.value = created.id;
+              onDrawLayerSelect(created.id);
+              showToast(`Слой «${name}» создан`);
+            } catch (err) {
+              showToast(err.message, true);
+              populateDrawLayerSelect();
+            }
+          },
+        },
+        {
+          label: "Отмена",
+          className: "mini-btn",
+          onClick: () => {
+            closeAppModal();
+            populateDrawLayerSelect();
+          },
+        },
+      ],
     });
-    showToast(recs.length === 1 ? "Объект удалён" : `Удалено объектов: ${recs.length}`);
+    setTimeout(() => $("modal-new-layer-name")?.select(), 30);
     return;
   }
-  const last = annotations.pop();
-  if (last?.layer) {
-    map().removeLayer(last.layer);
-    return;
+  if (createSession || editDrawMode === "connect") return;
+  if (selected.length === 1) {
+    const record = getObjectRecord(selected[0]);
+    if (record && record.layer.id !== value) {
+      const target = getLayer(value);
+      queue(async () => {
+        await moveTracked(record.obj.id, record.layer.id, value);
+        showToast(`Объект перенесён в слой «${target?.name || ""}»`);
+      });
+    }
   }
-  if (under?.layer) {
-    map().removeLayer(under.layer);
-    return;
-  }
-  if (hoverAnn) {
-    map().removeLayer(hoverAnn.layer);
-    return;
-  }
-  showToast("Нечего удалить");
 }
 
-export function toggleLabelsAndCoords() {
-  const labels = $("opt-field-labels");
-  const coords = $("opt-field-coords");
-  const next = !(labels?.checked && coords?.checked);
-  if (labels) labels.checked = next;
-  if (coords) coords.checked = next;
-  labelsOn = next;
-  coordsOn = next;
+/* ---------------------------------------------------------------- tool switching */
+
+function deactivateCurrentTool() {
+  stopFreehandEdit();
+  clearPolygonDraft();
+  clearRulerPreview();
+  clearCompassDrawing();
+  $("map-area")?.classList.remove("tool-eraser", "tool-brush");
 }
 
-export function setTool(name) {
-  detach();
-  active = name || "select";
-  document.querySelectorAll(".tool-btn").forEach((btn) => {
-    btn.classList.toggle("active", btn.dataset.tool === active);
+function ensureBound() {
+  if (bound) return;
+  const m = map();
+  const group = getFeatureGroup();
+  if (!m || !group) return;
+  bound = true;
+  ensureGroups();
+  m.on("click", onMapClick);
+  group.on("click", onObjectClick);
+  group.on("dblclick", onObjectDblClick);
+  onRecordsChanged(onRecordsRebuilt);
+  // «Слои карты» → click on an object name: select it and fly to it.
+  document.addEventListener("av:select-object", (e) => {
+    if (!e.detail?.id) return;
+    if (active !== "select") setTool("select", { silent: true });
+    selectObjectById(e.detail.id, { zoom: !!e.detail.zoom });
+  });
+  setUndoHook(() => {
+    clearSelection();
+    hideFieldDetail();
+  });
+}
+
+export function setTool(tool, { silent = false } = {}) {
+  ensureBound();
+  const name = TOOL_NAMES[tool] ? tool : "select";
+  if (mergeActive && name !== "select") cancelMergeMode();
+  if (name !== "freehand" && name !== "polygon") createSession = false;
+  deactivateCurrentTool();
+  active = name;
+  editDrawMode = null;
+  document.querySelectorAll(".tool-btn[data-tool]").forEach((btn) => {
+    btn.classList.toggle("active", btn.dataset.tool === name);
   });
   const mapArea = $("map-area");
   if (mapArea) {
-    mapArea.className = mapArea.className.replace(/tool-\w+/g, "").trim();
-    mapArea.classList.add(`tool-${active}`);
-    if (active === "brush" || active === "eraser") mapArea.classList.add("tool-freehand");
+    mapArea.classList.remove(
+      "tool-select",
+      "tool-ruler",
+      "tool-compass",
+      "tool-text",
+      "tool-freehand",
+      "tool-eraser",
+      "tool-brush",
+      "tool-polygon",
+      "tool-merge",
+    );
+    mapArea.classList.add(`tool-${name}`);
   }
-  if (["select", "ruler", "compass", "text"].includes(active)) {
-    $("edit-area-controls").style.display = "none";
-    $("merge-mode-panel").style.display = "none";
-    $("create-area-item")?.classList.remove("active");
-    $("polygon-area-item")?.classList.remove("active");
-    $("edit-area-item")?.classList.remove("active");
-    $("merge-menu-item")?.classList.remove("active");
-  }
-  const m = map();
-  if (!m) return;
-  if (active === "select") {
-    on("click", onSelectClick, getFeatureGroup());
-    on("click", onMapBlankClick);
-  } else if (active === "ruler") {
-    on("click", onRulerClick);
-    on("mousemove", onRulerMove);
-  } else if (active === "compass") {
-    on("click", onCompassClick);
-    on("mousemove", onCompassMove);
-  } else if (active === "text") on("click", onTextClick);
-  else if (active === "brush" || active === "freehand" || active === "eraser") {
-    m.dragging.disable();
-    on("mousedown", onBrushDown, m.getContainer());
-    on("mousemove", onBrushMove, document);
-    on("mouseup", onBrushUp, document);
-  } else if (active === "polygon") {
-    m.dragging.disable();
-    m.doubleClickZoom?.disable();
-    on("click", onPolygonClick);
-    on("mousemove", onPolygonMove);
-    on("dblclick", onPolygonDblClick);
-  } else if (active === "merge") {
-    on("click", onMergeClick, getFeatureGroup());
+  map()?.dragging?.enable();
+  const box = $("edit-area-controls");
+  if (box) box.style.display = "none";
+  syncMenuItems();
+  if (!silent) {
+    const label = TOOL_NAMES[name] || name;
+    showToast(`Инструмент: ${label}`);
+    logAction("tool", `Выбран инструмент: ${label}`);
   }
 }
 
-export function activateMapTool(name) {
-  setTool(name);
+export function activateMapTool(name, options) {
+  setTool(name, options);
 }
 
-export { labelsOn, coordsOn };
+/** Esc: drop whatever is being drawn (nothing is saved) and return to selection. */
+export function cancelActiveTool({ silent = false } = {}) {
+  if (mergeActive) cancelMergeMode();
+  map()?.closePopup();
+  createSession = false;
+  deactivateCurrentTool();
+  const box = $("edit-area-controls");
+  if (box) box.style.display = "none";
+  setEraserEnabled(true);
+  setTool("select", { silent });
+}
+
+/** Ctrl+G: captions and vertex coordinates together. */
+export function toggleLabelsAndCoords() {
+  const current = getMapDisplay();
+  const next = !(current.labels && current.coords);
+  setMapDisplayOption("labels", next);
+  setMapDisplayOption("coords", next);
+  showToast(next ? "Подписи и координаты включены" : "Подписи и координаты скрыты");
+}
+
+/** After logout: forget the selection, marks and history of the previous account. */
+export function resetTools() {
+  cancelActiveTool({ silent: true });
+  clearSelection();
+  hideFieldDetail();
+  overlays.forEach(({ layer, parent }) => parent?.removeLayer(layer));
+  overlays = [];
+  hoveredOverlay = null;
+  selectedOverlay = null;
+  selectionHistory.length = 0;
+  historyCursor = -1;
+  clearIdAliases();
+}

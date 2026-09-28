@@ -51,6 +51,162 @@ def _point_from_outline(poly: np.ndarray, class_id: int, confidence: float) -> d
     }
 
 
+# Sliced YOLO inference: a large map snapshot is cut into overlapping tiles of the
+# model's training size, so small objects are not lost by shrinking the whole image.
+YOLO_DEFAULT_IMGSZ = 640
+YOLO_SLICE_OVERLAP = 0.2
+YOLO_SLICE_MIN_FACTOR = 1.5  # slice only images noticeably larger than one tile
+YOLO_SLICE_BATCH = 8
+
+
+def yolo_train_size(model: Any) -> int:
+    """Training image size of an Ultralytics model (its default predict size)."""
+    sources = [getattr(model, "overrides", None), getattr(getattr(model, "model", None), "args", None)]
+    for src in sources:
+        value = src.get("imgsz") if isinstance(src, dict) else getattr(src, "imgsz", None)
+        if value:
+            try:
+                return int(max(value) if isinstance(value, (list, tuple)) else value)
+            except (TypeError, ValueError):
+                continue
+    return YOLO_DEFAULT_IMGSZ
+
+
+def tile_windows(height: int, width: int, tile: int, overlap: float = YOLO_SLICE_OVERLAP) -> list[tuple[int, int, int, int]]:
+    """Overlapping (x0, y0, x1, y1) windows covering the whole image; the last ones touch the edges."""
+    tile = max(32, int(tile))
+    stride = max(1, int(round(tile * (1.0 - overlap))))
+
+    def starts(size: int) -> list[int]:
+        if size <= tile:
+            return [0]
+        values = list(range(0, size - tile, stride))
+        values.append(size - tile)
+        return sorted(set(values))
+
+    return [
+        (x, y, min(width, x + tile), min(height, y + tile))
+        for y in starts(height)
+        for x in starts(width)
+    ]
+
+
+def merge_sliced_detections(
+    polygons: list[dict[str, Any]], points: list[dict[str, Any]], min_point_dist: float = 8.0
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Joins pieces of one object cut by tile borders and drops duplicates from overlaps."""
+    from shapely.geometry import Polygon as ShapelyPolygon
+    from shapely.ops import unary_union
+
+    by_class: dict[int, list[tuple[Any, float]]] = {}
+    order: list[int] = []
+    for item in polygons:
+        ring = item["geometry"]["coordinates"][0]
+        try:
+            shape = ShapelyPolygon(ring).buffer(0)
+        except Exception:
+            continue
+        if shape.is_empty:
+            continue
+        cid = int(item["class_id"])
+        if cid not in by_class:
+            by_class[cid] = []
+            order.append(cid)
+        by_class[cid].append((shape, float(item["confidence"])))
+
+    merged_polygons: list[dict[str, Any]] = []
+    for cid in order:
+        items = by_class[cid]
+        union = unary_union([shape for shape, _ in items])
+        parts = list(getattr(union, "geoms", [union]))
+        for part in parts:
+            if part.is_empty or part.geom_type != "Polygon":
+                continue
+            conf = max((c for shape, c in items if shape.intersects(part)), default=0.0)
+            rings = [[[float(x), float(y)] for x, y in part.exterior.coords]]
+            rings += [[[float(x), float(y)] for x, y in hole.coords] for hole in part.interiors]
+            merged_polygons.append(
+                {"class_id": cid, "confidence": conf, "geometry": {"type": "Polygon", "coordinates": rings}}
+            )
+
+    kept: list[dict[str, Any]] = []
+    for item in sorted(points, key=lambda p: -float(p["confidence"])):
+        x, y = item["geometry"]["coordinates"]
+        radius = float(item.get("radius_approx") or 0.0)
+        duplicate = False
+        for other in kept:
+            if other["class_id"] != item["class_id"]:
+                continue
+            ox, oy = other["geometry"]["coordinates"]
+            limit = max(min_point_dist, radius, float(other.get("radius_approx") or 0.0))
+            if (x - ox) ** 2 + (y - oy) ** 2 <= limit * limit:
+                duplicate = True
+                break
+        if not duplicate:
+            kept.append(item)
+    return merged_polygons, kept
+
+
+def parse_yolo_results(
+    results: Any, names: Any, dx: float = 0.0, dy: float = 0.0
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """YOLO results → polygon/point features in image pixels (shifted by the tile offset)."""
+    polygons: list[dict[str, Any]] = []
+    points: list[dict[str, Any]] = []
+    for result in results:
+        boxes = getattr(result, "boxes", None)
+        masks = getattr(result, "masks", None)
+        result_names = getattr(result, "names", None) or names
+        if masks is not None and getattr(masks, "xy", None) is not None and len(masks.xy):
+            for idx, poly in enumerate(masks.xy):
+                if boxes is None:
+                    continue
+                class_id = yolo_class_id(result_names, int(boxes.cls[idx]))
+                if class_id is None or len(poly) < 3:
+                    continue
+                conf = float(boxes.conf[idx])
+                shifted = np.asarray(poly, dtype=float) + np.array([dx, dy])
+                if class_id in POINT_CLASS_IDS:
+                    points.append(_point_from_outline(shifted, class_id, conf))
+                else:
+                    ring = [[float(x), float(y)] for x, y in shifted]
+                    if ring[0] != ring[-1]:
+                        ring.append(ring[0])
+                    polygons.append(
+                        {
+                            "class_id": class_id,
+                            "confidence": conf,
+                            "geometry": {"type": "Polygon", "coordinates": [ring]},
+                        }
+                    )
+        elif boxes is not None:
+            for box in boxes:
+                class_id = yolo_class_id(result_names, int(box.cls))
+                if class_id is None:
+                    continue
+                x0, y0, x1, y1 = (float(v) for v in box.xyxy[0].tolist())
+                x0, x1 = x0 + dx, x1 + dx
+                y0, y1 = y0 + dy, y1 + dy
+                if class_id in POINT_CLASS_IDS:
+                    points.append(
+                        {
+                            "class_id": class_id,
+                            "confidence": float(box.conf),
+                            "geometry": {"type": "Point", "coordinates": [(x0 + x1) / 2, (y0 + y1) / 2]},
+                        }
+                    )
+                else:
+                    ring = [[x0, y0], [x1, y0], [x1, y1], [x0, y1], [x0, y0]]
+                    polygons.append(
+                        {
+                            "class_id": class_id,
+                            "confidence": float(box.conf),
+                            "geometry": {"type": "Polygon", "coordinates": [ring]},
+                        }
+                    )
+    return polygons, points
+
+
 def segformer_polygons(items: Any, confidence: float, sx: float = 1.0, sy: float = 1.0) -> list[dict[str, Any]]:
     """Convert segmentation_service PolygonItem.polygon_px outlines to inference features."""
     polygons: list[dict[str, Any]] = []
@@ -198,58 +354,28 @@ class ModelRuntime:
 
         # _decode_image yields RGB; Ultralytics treats numpy input as BGR.
         bgr = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
-        results = self._yolo.predict(bgr, conf=confidence, verbose=False)
         names = getattr(self._yolo, "names", None) or {}
+        tile = yolo_train_size(self._yolo)
+        height, width = bgr.shape[:2]
+        if max(height, width) <= tile * YOLO_SLICE_MIN_FACTOR:
+            # Small snapshot: one pass, as before.
+            results = self._yolo.predict(bgr, conf=confidence, verbose=False)
+            polygons, points = parse_yolo_results(results, names)
+            return {"model": "yolo_seg_26", "polygons": polygons, "points": points}
+
+        windows = tile_windows(height, width, tile)
+        logger.info("YOLO sliced inference: %sx%s px → %s tiles of %s px", width, height, len(windows), tile)
         polygons: list[dict[str, Any]] = []
         points: list[dict[str, Any]] = []
-        for result in results:
-            boxes = getattr(result, "boxes", None)
-            masks = getattr(result, "masks", None)
-            result_names = getattr(result, "names", None) or names
-            if masks is not None and getattr(masks, "xy", None) is not None and len(masks.xy):
-                for idx, poly in enumerate(masks.xy):
-                    if boxes is None:
-                        continue
-                    class_id = yolo_class_id(result_names, int(boxes.cls[idx]))
-                    if class_id is None or len(poly) < 3:
-                        continue
-                    conf = float(boxes.conf[idx])
-                    if class_id in POINT_CLASS_IDS:
-                        points.append(_point_from_outline(poly, class_id, conf))
-                    else:
-                        ring = [[float(x), float(y)] for x, y in poly]
-                        if ring[0] != ring[-1]:
-                            ring.append(ring[0])
-                        polygons.append(
-                            {
-                                "class_id": class_id,
-                                "confidence": conf,
-                                "geometry": {"type": "Polygon", "coordinates": [ring]},
-                            }
-                        )
-            elif boxes is not None:
-                for box in boxes:
-                    class_id = yolo_class_id(result_names, int(box.cls))
-                    if class_id is None:
-                        continue
-                    x0, y0, x1, y1 = (float(v) for v in box.xyxy[0].tolist())
-                    if class_id in POINT_CLASS_IDS:
-                        points.append(
-                            {
-                                "class_id": class_id,
-                                "confidence": float(box.conf),
-                                "geometry": {"type": "Point", "coordinates": [(x0 + x1) / 2, (y0 + y1) / 2]},
-                            }
-                        )
-                    else:
-                        ring = [[x0, y0], [x1, y0], [x1, y1], [x0, y1], [x0, y0]]
-                        polygons.append(
-                            {
-                                "class_id": class_id,
-                                "confidence": float(box.conf),
-                                "geometry": {"type": "Polygon", "coordinates": [ring]},
-                            }
-                        )
+        for start_idx in range(0, len(windows), YOLO_SLICE_BATCH):
+            batch = windows[start_idx : start_idx + YOLO_SLICE_BATCH]
+            crops = [np.ascontiguousarray(bgr[y0:y1, x0:x1]) for x0, y0, x1, y1 in batch]
+            results = self._yolo.predict(crops, conf=confidence, verbose=False, imgsz=tile)
+            for (x0, y0, _x1, _y1), result in zip(batch, results):
+                tile_polys, tile_points = parse_yolo_results([result], names, dx=x0, dy=y0)
+                polygons.extend(tile_polys)
+                points.extend(tile_points)
+        polygons, points = merge_sliced_detections(polygons, points)
         return {"model": "yolo_seg_26", "polygons": polygons, "points": points}
 
     def _run_segformer(self, image: np.ndarray, confidence: float) -> dict[str, Any]:

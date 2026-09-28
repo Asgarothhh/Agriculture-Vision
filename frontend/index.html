@@ -252,14 +252,9 @@
                         <span class="collapse-icon" id="categories-group-icon">▾</span>
                     </div>
                     <div id="categories-group">
+                    <div id="folders-list"></div>
                     <div id="layers-list"></div>
                     </div>
-                </div>
-
-                <div class="layer-group">
-                    <div class="layer-group-title">МОИ СЛОИ</div>
-                    <div id="folders-list"></div>
-                    <div id="user-layers-list"></div>
                 </div>
 
                 <label class="settings-toggle map-display-toggle">
@@ -617,18 +612,23 @@
                         <button type="button" class="mini-btn" id="merge-cancel-btn">Отмена</button>
                     </div>
                 </div>
+                <div class="more-menu-item" id="manual-connect-menu-item">
+                    <svg class="menu-icon-svg" viewBox="0 0 24 24" width="18" height="18" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><circle cx="5" cy="12" r="2.5" stroke="currentColor" stroke-width="1.6"/><circle cx="19" cy="12" r="2.5" stroke="currentColor" stroke-width="1.6"/><path d="M7.5 12H16.5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-dasharray="2.5 2.5"/></svg>
+                    Соединить линией
+                    <small>Нарисуйте линию между двумя областями — соединятся по ней</small>
+                </div>
                 <!-- Панель кисти/ластика — внутри меню «Ещё», не пересекается с основной панелью -->
                 <div id="edit-area-controls" class="edit-area-controls" style="display:none;">
                     <div class="edit-area-title" id="paint-hud-title">Рисование</div>
                     <p class="edit-area-hint" id="paint-hud-hint">Зажмите ЛКМ и ведите. Замкните к началу — полигон; иначе — полоса по толщине.</p>
                     <div class="settings-block-title">Слой</div>
                     <select id="draw-layer-select" class="search-input"></select>
-                    <div class="edit-mode-btns">
+                    <div class="edit-mode-btns" id="edit-mode-toggle-row">
                         <button type="button" class="mini-btn" id="edit-brush-btn">Кисть</button>
                         <button type="button" class="mini-btn" id="edit-polygon-btn">По точкам</button>
                         <button type="button" class="mini-btn" id="edit-eraser-btn">Ластик</button>
                     </div>
-                    <div class="settings-block-title">Толщина кисти/ластика: <span id="brush-size-value">20</span> м</div>
+                    <div class="settings-block-title">Толщина: <span id="brush-size-value">20</span> м</div>
                     <input type="range" id="brush-size" min="5" max="80" value="20" class="range-input settings-range">
                     <button type="button" class="mini-btn mini-btn-red" id="finish-edit-btn">Готово</button>
                 </div>

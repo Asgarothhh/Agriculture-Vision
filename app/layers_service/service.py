@@ -242,6 +242,8 @@ async def object_payload(db: AsyncSession, obj: LayerObject) -> dict[str, Any]:
         "geom": geojson,
         "is_point": obj.is_point,
         "origin": obj.origin,
+        "folder_id": obj.folder_id,
+        "crop": obj.crop,
         "area_ha": obj.area_ha,
         "area": formatted["area"],
         "unit": formatted["unit"],
@@ -261,6 +263,8 @@ async def update_object(db: AsyncSession, user: User, object_id: UUID, data: Obj
     if data.layer_id is not None:
         layer = await get_owned_layer(db, user, data.layer_id)
         obj.layer_id = layer.id
+    if "crop" in data.model_fields_set:
+        obj.crop = (data.crop or "").strip() or None
     await db.flush()
     await recalc_area(db, obj)
     await log_event(db, user.id, "map_tools", f"Изменён объект {obj.name}", {"object_id": str(obj.id)})
@@ -456,6 +460,7 @@ async def export_layers(db: AsyncSession, user: User, data: ExportRequest) -> tu
                     "is_point": obj.is_point,
                     "origin": obj.origin,
                     "area_ha": obj.area_ha,
+                    "crop": obj.crop,
                 }
             )
         packed.append(

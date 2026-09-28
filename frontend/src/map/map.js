@@ -1,10 +1,23 @@
-import { dzzEnsureTileBlob, dzzPrefetch } from "../dzz/tiles.js";
-import { getActiveBasemapTileUrl, toSameOriginDzzUrl } from "../dzz/urls.js";
-import { escapeHtml, isSecurityError, withTimeout } from "../ui.js";
+import { dzzEnsureTileBlob, dzzFetchResilient, dzzPrefetch } from "../dzz/tiles.js";
+import {
+  DZZ_DEFAULT_SERVICE,
+  dzzSession,
+  getActiveBasemapTileUrl,
+  normalizeServiceRoot,
+  toSameOriginDzzUrl,
+} from "../dzz/urls.js";
+import { isSecurityError, withTimeout } from "../ui.js";
 
 const DEFAULT_CENTER = [53.9, 27.55];
 const DEFAULT_ZOOM = 13;
-const TILE_OPTS = { maxZoom: 19, keepBuffer: 4, updateWhenZooming: true };
+const TILE_OPTS = {
+  maxZoom: 22,
+  maxNativeZoom: 19,
+  minZoom: 3,
+  keepBuffer: 4,
+  updateWhenZooming: true,
+  updateWhenIdle: true,
+};
 const ESRI_PROXY_TEMPLATE = "/basemap/esri/{z}/{y}/{x}";
 const ESRI_DIRECT_TEMPLATE =
   "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}";
@@ -19,8 +32,6 @@ let aoiLayer = null;
 let featureGroup;
 let loadingCount = 0;
 let dzzGrid = null;
-const visitedBounds = [];
-let visitedCursor = -1;
 
 export function getMap() {
   return map;
@@ -74,7 +85,7 @@ export function initMap() {
     map.invalidateSize();
     return map;
   }
-  map = L.map("map", { zoomControl: false }).setView(DEFAULT_CENTER, DEFAULT_ZOOM);
+  map = L.map("map", { zoomControl: false, minZoom: 3, maxZoom: 22 }).setView(DEFAULT_CENTER, DEFAULT_ZOOM);
   L.control.zoom({ position: "bottomleft" }).addTo(map);
   tileSatellite = L.tileLayer(ESRI_PROXY_TEMPLATE, {
     ...TILE_OPTS,
@@ -140,46 +151,55 @@ function updateScale() {
   }
 }
 
+let basemapKind = "satellite";
+
+/** Basemap currently on the map: satellite | scheme | dzz | custom. */
+export function getBasemapKind() {
+  return basemapKind;
+}
+
 export function setBasemap(kind, customUrl) {
   if (!map) return;
   [tileSatellite, tileScheme, tileDzz, tileCustom].forEach((layer) => {
     if (layer && map.hasLayer(layer)) map.removeLayer(layer);
   });
-  if (kind === "scheme") tileScheme.addTo(map);
-  else if (kind === "dzz") {
+  if (kind === "scheme") {
+    tileScheme.addTo(map);
+    basemapKind = "scheme";
+  } else if (kind === "dzz") {
     tileDzz.redraw();
     tileDzz.addTo(map);
-  }
-  else if (kind === "custom" && customUrl) {
+    basemapKind = "dzz";
+  } else if (kind === "custom" && customUrl) {
     tileCustom = L.tileLayer(customUrl, { ...TILE_OPTS, attribution: "custom", crossOrigin: "anonymous" });
     bindTileLoadIndicator(tileCustom);
     tileCustom.addTo(map);
-  } else tileSatellite.addTo(map);
+    basemapKind = "custom";
+  } else {
+    tileSatellite.addTo(map);
+    basemapKind = "satellite";
+  }
+  // The dzz.by dock and other widgets follow the basemap without importing each other.
+  document.dispatchEvent(new CustomEvent("av:basemap", { detail: { kind: basemapKind } }));
+}
+
+/** Web-Mercator tile z/x/y under the map centre (or a given point) at the current zoom. */
+export function getMapTileCoords(latlng) {
+  if (!map) return { z: 0, x: 0, y: 0 };
+  const z = Math.max(0, Math.min(22, Math.round(map.getZoom())));
+  const p = map.project(latlng || map.getCenter(), z);
+  const n = 2 ** z;
+  return {
+    z,
+    x: Math.min(n - 1, Math.max(0, Math.floor(p.x / 256))),
+    y: Math.min(n - 1, Math.max(0, Math.floor(p.y / 256))),
+  };
 }
 
 export function setAoiBounds(bounds) {
   clearAoi();
   aoiLayer = L.rectangle(bounds, { color: "#e14059", weight: 2, dashArray: "6 4", fillOpacity: 0.05 });
   aoiLayer.addTo(map);
-  rememberBounds(bounds);
-}
-
-export function rememberBounds(bounds) {
-  if (!bounds) return;
-  visitedBounds.unshift(L.latLngBounds(bounds));
-  if (visitedBounds.length > 40) visitedBounds.pop();
-  visitedCursor = 0;
-}
-
-export function cycleVisitedBounds() {
-  if (!visitedBounds.length || !map) return 0;
-  visitedCursor = (visitedCursor + 1) % visitedBounds.length;
-  map.fitBounds(visitedBounds[visitedCursor], { maxZoom: 16 });
-  return visitedCursor;
-}
-
-export function visitedCount() {
-  return visitedBounds.length;
 }
 
 export function clearAoi() {
@@ -219,7 +239,11 @@ export function leafletToGeoJson(layer) {
   return layer.toGeoJSON().geometry;
 }
 
-export function addGeoJsonObject(obj, style) {
+/**
+ * Leaflet layer for one server object. Captions are drawn separately (store.renderFieldLabels),
+ * as in the reference. Objects of a hidden layer are built but kept off the map.
+ */
+export function addGeoJsonObject(obj, style, { visible = true } = {}) {
   const geo = obj.geom || obj.geometry;
   if (!geo) return null;
   const layer = L.geoJSON(
@@ -228,27 +252,39 @@ export function addGeoJsonObject(obj, style) {
       style: () => ({
         color: style?.color || "#43A047",
         weight: style?.weight || 2,
+        fillColor: style?.color || "#43A047",
         fillOpacity: style?.fillOpacity ?? 0.35,
       }),
       pointToLayer: (_f, latlng) =>
         L.circleMarker(latlng, {
           radius: style?.pointSize || 5,
           color: style?.color || "#546E7A",
-          fillOpacity: 0.9,
+          fillColor: style?.color || "#546E7A",
+          fillOpacity: style?.pointFillOpacity ?? 0.9,
+          weight: style?.weight || 2,
         }),
     },
   );
+  // Clicks are not stopped here: in the select tool map/tools.js stops them itself; other
+  // tools (ruler, compass, text, «по точкам») must receive clicks made on top of objects.
   layer.eachLayer((part) => {
     part.avObject = obj;
     part.avLayerId = obj.layer_id;
-    L.DomEvent.on(part, "click", (ev) => L.DomEvent.stopPropagation(ev));
-    const showLabels = document.getElementById("opt-field-labels")?.checked !== false;
-    if (showLabels && obj.name) {
-      part.bindTooltip(escapeHtml(obj.name), { permanent: true, direction: "center", className: "field-label" });
-    }
   });
-  featureGroup.addLayer(layer);
+  if (visible) featureGroup.addLayer(layer);
   return layer;
+}
+
+/** Shows or hides an object's Leaflet layer (layer visibility toggle) without rebuilding it. */
+export function setObjectLayerVisible(layer, visible) {
+  if (!layer || !featureGroup) return;
+  const has = featureGroup.hasLayer(layer);
+  if (visible && !has) featureGroup.addLayer(layer);
+  else if (!visible && has) featureGroup.removeLayer(layer);
+}
+
+export function removeObjectLayer(layer) {
+  if (layer && featureGroup?.hasLayer(layer)) featureGroup.removeLayer(layer);
 }
 
 export function clearFeatures() {
@@ -351,41 +387,268 @@ function canvasToJpeg(canvas) {
   });
 }
 
+/** Old way: copy the tiles currently on screen (screen resolution). Last-resort fallback. */
+async function captureScreenJpeg() {
+  const size = map.getSize();
+  if (!size.x || !size.y) throw new Error("Пустой кадр карты");
+  const rect = captureRect();
+  const canvas = document.createElement("canvas");
+  canvas.width = rect.w;
+  canvas.height = rect.h;
+  const ctx = canvas.getContext("2d");
+  ctx.fillStyle = "#111";
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  const mapPos = map.getContainer().getBoundingClientRect();
+  const origin = { left: mapPos.left + rect.x, top: mapPos.top + rect.y };
+  const box = { left: origin.left, top: origin.top, right: origin.left + rect.w, bottom: origin.top + rect.h };
+  const imgs = [...map.getPane("tilePane").querySelectorAll("img")];
+  const painted = await Promise.all(imgs.map((img) => paintTile(ctx, img, origin, box).catch(() => false)));
+  if (!painted.some(Boolean)) {
+    throw new Error("Не удалось получить тайлы подложки для снимка. Дождитесь загрузки карты или смените подложку.");
+  }
+  const blob = await canvasToJpeg(canvas);
+  const nw = map.containerPointToLatLng([rect.x, rect.y]);
+  const se = map.containerPointToLatLng([rect.x + rect.w, rect.y + rect.h]);
+  return {
+    blob,
+    geoBounds: { west: nw.lng, south: se.lat, east: se.lng, north: nw.lat },
+    info: { mode: "screen", width: rect.w, height: rect.h, zoom: map.getZoom() },
+  };
+}
+
+// Segmentation snapshot as in the reference: native tiles at the best zoom for the
+// area, independent of the window size and of the zoom shown on screen.
+export const CAPTURE_TILE = 256;
+// 4096 px = the server limit (SegFormer max_side_px); YOLO cuts large snapshots into tiles.
+export const CAPTURE_MAX_EDGE = 4096;
+export const CAPTURE_MAX_ZOOM = 18;
+const CAPTURE_PARALLEL = 8;
+
 /**
- * Snapshot of the basemap under the AOI (or the whole view without an AOI).
+ * Highest zoom (≤ maxZoom) at which the area fits into `maxEdge` pixels; then raised
+ * until the short side has at least one tile of pixels. `edgeAt(z)` → {w, h} in pixels.
+ */
+export function chooseCaptureZoom(edgeAt, currentZoom, { maxZoom = CAPTURE_MAX_ZOOM, maxEdge = CAPTURE_MAX_EDGE } = {}) {
+  let z = Math.min(maxZoom, Math.max(1, Math.round(currentZoom)));
+  while (z > 1) {
+    const { w, h } = edgeAt(z);
+    if (Math.max(w, h) <= maxEdge) break;
+    z -= 1;
+  }
+  while (z < maxZoom) {
+    const { w, h } = edgeAt(z + 1);
+    if (Math.max(w, h) > maxEdge) break;
+    z += 1;
+  }
+  while (z < maxZoom) {
+    const { w, h } = edgeAt(z);
+    if (Math.min(w, h) >= CAPTURE_TILE) break;
+    z += 1;
+  }
+  return z;
+}
+
+function captureBounds() {
+  const b = aoiLayer ? aoiLayer.getBounds() : map.getBounds();
+  if (!b?.isValid?.() || b.getSouth() >= b.getNorth() || b.getWest() >= b.getEast()) return map.getBounds();
+  return b;
+}
+
+/** Candidate URLs of one basemap tile (the first that loads wins). */
+function captureTileUrls(z, x, y) {
+  if (basemapKind === "scheme") return [`https://${"abc"[(x + y) % 3]}.tile.openstreetmap.org/${z}/${x}/${y}.png`];
+  if (basemapKind === "dzz") return [toSameOriginDzzUrl(getActiveBasemapTileUrl(z, x, y))];
+  if (basemapKind === "custom" && tileCustom?._url) {
+    const subs = tileCustom.options.subdomains || "abc";
+    const s = subs[Math.abs(x + y) % subs.length];
+    return [L.Util.template(tileCustom._url, { ...tileCustom.options, s, x, y, z, r: "" })];
+  }
+  return [L.Util.template(ESRI_PROXY_TEMPLATE, { x, y, z }), L.Util.template(ESRI_DIRECT_TEMPLATE, { x, y, z })];
+}
+
+async function loadCaptureTile(urls) {
+  for (const url of urls) {
+    try {
+      if (basemapKind === "dzz") {
+        const blob = await dzzEnsureTileBlob(url);
+        if (!blob || blob.size < 400) continue;
+        return await createImageBitmap(blob);
+      }
+      const bmp = await fetchTileBitmap(url);
+      if (bmp) return bmp;
+    } catch {
+      /* next candidate */
+    }
+  }
+  return null;
+}
+
+async function runPool(jobs, limit) {
+  let next = 0;
+  const worker = async () => {
+    while (next < jobs.length) {
+      const job = jobs[next];
+      next += 1;
+      await job();
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(limit, jobs.length) }, worker));
+}
+
+function boundsToGeo(bounds) {
+  return { west: bounds.getWest(), south: bounds.getSouth(), east: bounds.getEast(), north: bounds.getNorth() };
+}
+
+async function captureTileMosaic(bounds) {
+  const edgeAt = (z) => {
+    const nw = map.project(bounds.getNorthWest(), z);
+    const se = map.project(bounds.getSouthEast(), z);
+    return { w: Math.abs(se.x - nw.x), h: Math.abs(se.y - nw.y) };
+  };
+  const zoom = chooseCaptureZoom(edgeAt, map.getZoom());
+  const nwPix = map.project(bounds.getNorthWest(), zoom);
+  const sePix = map.project(bounds.getSouthEast(), zoom);
+  const minX = Math.min(nwPix.x, sePix.x);
+  const maxX = Math.max(nwPix.x, sePix.x);
+  const minY = Math.min(nwPix.y, sePix.y);
+  const maxY = Math.max(nwPix.y, sePix.y);
+  let outW = Math.max(64, Math.round(maxX - minX));
+  let outH = Math.max(64, Math.round(maxY - minY));
+  const scale = Math.min(1, CAPTURE_MAX_EDGE / Math.max(outW, outH));
+  outW = Math.max(64, Math.round(outW * scale));
+  outH = Math.max(64, Math.round(outH * scale));
+
+  const tileMinX = Math.floor(minX / CAPTURE_TILE);
+  const tileMaxX = Math.floor((maxX - 1e-6) / CAPTURE_TILE);
+  const tileMinY = Math.floor(minY / CAPTURE_TILE);
+  const tileMaxY = Math.floor((maxY - 1e-6) / CAPTURE_TILE);
+  const n = 2 ** zoom;
+  const mosaic = document.createElement("canvas");
+  mosaic.width = (tileMaxX - tileMinX + 1) * CAPTURE_TILE;
+  mosaic.height = (tileMaxY - tileMinY + 1) * CAPTURE_TILE;
+  const mctx = mosaic.getContext("2d");
+  mctx.fillStyle = "#1a1a1a";
+  mctx.fillRect(0, 0, mosaic.width, mosaic.height);
+
+  let total = 0;
+  let painted = 0;
+  const jobs = [];
+  for (let ty = tileMinY; ty <= tileMaxY; ty += 1) {
+    if (ty < 0 || ty >= n) continue;
+    for (let tx = tileMinX; tx <= tileMaxX; tx += 1) {
+      const x = ((tx % n) + n) % n;
+      const dx = (tx - tileMinX) * CAPTURE_TILE;
+      const dy = (ty - tileMinY) * CAPTURE_TILE;
+      total += 1;
+      jobs.push(async () => {
+        const bmp = await loadCaptureTile(captureTileUrls(zoom, x, ty));
+        if (!bmp) return;
+        try {
+          mctx.drawImage(bmp, dx, dy, CAPTURE_TILE, CAPTURE_TILE);
+          painted += 1;
+        } finally {
+          bmp.close?.();
+        }
+      });
+    }
+  }
+  await runPool(jobs, CAPTURE_PARALLEL);
+  if (!painted) throw new Error("Не удалось загрузить тайлы подложки для снимка");
+
+  const out = document.createElement("canvas");
+  out.width = outW;
+  out.height = outH;
+  const octx = out.getContext("2d");
+  octx.imageSmoothingEnabled = true;
+  octx.imageSmoothingQuality = "high";
+  octx.drawImage(
+    mosaic,
+    minX - tileMinX * CAPTURE_TILE,
+    minY - tileMinY * CAPTURE_TILE,
+    Math.max(1, maxX - minX),
+    Math.max(1, maxY - minY),
+    0,
+    0,
+    outW,
+    outH,
+  );
+  const blob = await canvasToJpeg(out);
+  return {
+    blob,
+    geoBounds: boundsToGeo(bounds),
+    info: { mode: "tiles", zoom, width: outW, height: outH, tiles: total, painted },
+  };
+}
+
+/** dzz.by: one exportImage of the whole area (as in the reference) — full orthophoto detail. */
+async function captureDzzExport(bounds) {
+  if (dzzSession.wmtsTemplate) throw new Error("WMTS source: tiles only");
+  const root = normalizeServiceRoot(dzzSession.serviceRoot || dzzSession.url || DZZ_DEFAULT_SERVICE);
+  const sw = L.CRS.EPSG3857.project(bounds.getSouthWest());
+  const ne = L.CRS.EPSG3857.project(bounds.getNorthEast());
+  const xmin = Math.min(sw.x, ne.x);
+  const xmax = Math.max(sw.x, ne.x);
+  const ymin = Math.min(sw.y, ne.y);
+  const ymax = Math.max(sw.y, ne.y);
+  const aspect = (xmax - xmin) / Math.max(1, ymax - ymin);
+  let w = CAPTURE_MAX_EDGE;
+  let h = CAPTURE_MAX_EDGE;
+  if (aspect >= 1) h = Math.max(64, Math.round(w / aspect));
+  else w = Math.max(64, Math.round(h * aspect));
+  const url = toSameOriginDzzUrl(
+    `${root}/exportImage?bbox=${xmin},${ymin},${xmax},${ymax}&bboxSR=3857&imageSR=3857&size=${w},${h}&format=jpg&f=image`,
+  );
+  const res = await dzzFetchResilient(url, 30000);
+  if (!res.ok) throw new Error(`dzz exportImage ${res.status}`);
+  const type = (res.headers.get("content-type") || "").toLowerCase();
+  if (type && !type.startsWith("image/")) throw new Error("dzz exportImage: not an image");
+  const blob = await res.blob();
+  if (!blob || blob.size < 400) throw new Error("dzz exportImage: empty");
+  return { blob, geoBounds: boundsToGeo(bounds), info: { mode: "dzz-export", width: w, height: h } };
+}
+
+let lastCaptureInfo = null;
+
+/** Size/zoom of the last segmentation snapshot (for the status line and checks). */
+export function getLastCaptureInfo() {
+  return lastCaptureInfo;
+}
+
+/**
+ * Snapshot of the basemap under the AOI (or the whole view without an AOI) for segmentation.
  * Returns the JPEG and the geographic bounds that exactly match its pixels.
  */
 export async function captureMapJpeg() {
   return withTimeout(
     (async () => {
       if (!map) throw new Error("Карта ещё не готова");
-      const size = map.getSize();
-      if (!size.x || !size.y) throw new Error("Пустой кадр карты");
-      const rect = captureRect();
-      const canvas = document.createElement("canvas");
-      canvas.width = rect.w;
-      canvas.height = rect.h;
-      const ctx = canvas.getContext("2d");
-      ctx.fillStyle = "#111";
-      ctx.fillRect(0, 0, canvas.width, canvas.height);
-      const mapPos = map.getContainer().getBoundingClientRect();
-      const origin = { left: mapPos.left + rect.x, top: mapPos.top + rect.y };
-      const box = { left: origin.left, top: origin.top, right: origin.left + rect.w, bottom: origin.top + rect.h };
-      const imgs = [...map.getPane("tilePane").querySelectorAll("img")];
-      const painted = await Promise.all(imgs.map((img) => paintTile(ctx, img, origin, box).catch(() => false)));
-      if (!painted.some(Boolean)) {
-        throw new Error("Не удалось получить тайлы подложки для снимка. Дождитесь загрузки карты или смените подложку.");
+      const bounds = captureBounds();
+      let shot = null;
+      if (basemapKind === "dzz") {
+        try {
+          shot = await captureDzzExport(bounds);
+        } catch (err) {
+          console.warn("dzz exportImage capture → tiles", err);
+        }
       }
-      const blob = await canvasToJpeg(canvas);
-      const nw = map.containerPointToLatLng([rect.x, rect.y]);
-      const se = map.containerPointToLatLng([rect.x + rect.w, rect.y + rect.h]);
+      if (!shot) {
+        try {
+          shot = await captureTileMosaic(bounds);
+        } catch (err) {
+          if (isSecurityError(err)) throw err;
+          console.warn("tile mosaic capture → screen", err);
+        }
+      }
+      if (!shot) shot = await captureScreenJpeg();
+      lastCaptureInfo = shot.info;
       return {
-        file: new File([blob], `map_aoi_${Date.now()}.jpg`, { type: "image/jpeg" }),
-        geoBounds: { west: nw.lng, south: se.lat, east: se.lng, north: nw.lat },
+        file: new File([shot.blob], `map_aoi_${Date.now()}.jpg`, { type: "image/jpeg" }),
+        geoBounds: shot.geoBounds,
+        info: shot.info,
       };
     })(),
-    20000,
-    "Захват карты превысил 20 секунд",
+    60000,
+    "Захват карты превысил 60 секунд",
   );
 }
 

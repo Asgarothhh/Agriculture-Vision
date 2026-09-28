@@ -168,6 +168,15 @@ export function diffGeom(a, b) {
   }
 }
 
+/** Like diffGeom, but tells an empty result (null) from a clipping failure (undefined). */
+export function differenceGeom(a, b) {
+  try {
+    return fromMulti(polygonClipping.difference(toMulti(a), toMulti(b)));
+  } catch {
+    return undefined;
+  }
+}
+
 export function geodesicAreaM2(geom) {
   const rings = geom?.type === "Polygon" ? [geom.coordinates] : geom?.coordinates || [];
   let area = 0;
@@ -247,4 +256,159 @@ function convexHull(points) {
 export function layerToPolyBoolRegion(layer) {
   const geo = layer.toGeoJSON?.().geometry || layer.feature?.geometry;
   return geo;
+}
+
+/**
+ * Evenly spaced points along a freehand path (as in the reference): thins dense mouse
+ * points and fills long gaps, so the circles of the stroke buffer always overlap.
+ */
+export function resamplePath(path, stepM) {
+  if (!path?.length) return [];
+  const out = [path[0]];
+  for (let i = 1; i < path.length; i += 1) {
+    const a = path[i - 1];
+    const b = path[i];
+    const segLen = a.distanceTo(b);
+    if (segLen > stepM) {
+      const n = Math.ceil(segLen / stepM);
+      for (let k = 1; k < n; k += 1) {
+        const t = k / n;
+        out.push(L.latLng(a.lat + (b.lat - a.lat) * t, a.lng + (b.lng - a.lng) * t));
+      }
+    }
+    if (i === path.length - 1 || out.at(-1).distanceTo(b) >= stepM * 0.5) out.push(b);
+  }
+  return out;
+}
+
+/** Stroke of the brush/eraser: union of circles of `radiusM` along the path (follows the stroke shape). */
+export function strokeBufferGeom(path, radiusM) {
+  if (!path?.length) return null;
+  const step = Math.max(1, radiusM * 0.85);
+  const sampled = path.length > 1 ? resamplePath(path, step) : path.slice();
+  const circles = sampled.map((p) => toMulti(circlePolygon(p, radiusM, 16)));
+  try {
+    return fromMulti(polygonClipping.union(...circles));
+  } catch {
+    return null;
+  }
+}
+
+/** Freehand outline closed end-to-start; self-crossings are resolved. Null if degenerate. */
+export function outlinePolygonGeom(path) {
+  if (!path || path.length < 3) return null;
+  const ring = latlngsToRing(path);
+  if (ring.length < 4) return null;
+  try {
+    return fromMulti(polygonClipping.union([[ring]]));
+  } catch {
+    return null;
+  }
+}
+
+/** Is the freehand loop closed (end near start), in metres — the reference eraser «lasso» rule. */
+export function isLoopClosedM(path, radiusM) {
+  if (!path || path.length < 3) return false;
+  return path[0].distanceTo(path.at(-1)) <= Math.max(radiusM * 1.5, 10);
+}
+
+export function polygonParts(geom) {
+  return toMulti(geom);
+}
+
+/**
+ * Result of a boolean edit, as in the reference: the largest part is the object (holes
+ * inside it are kept); detached pieces are dropped. Objects that already consisted of
+ * several parts (imports, recognition) keep all parts.
+ */
+export function keepLargestPart(geom, { keepAllParts = false } = {}) {
+  const parts = toMulti(geom).filter((p) => p?.[0]?.length >= 4);
+  if (!parts.length) return { geom: null, holes: 0, discarded: false, isEmpty: true };
+  if (keepAllParts || parts.length === 1) {
+    return {
+      geom: fromMulti(parts),
+      holes: parts.reduce((n, p) => n + p.length - 1, 0),
+      discarded: false,
+      isEmpty: false,
+    };
+  }
+  let best = parts[0];
+  let bestArea = -1;
+  parts.forEach((p) => {
+    const area = geodesicAreaM2({ type: "Polygon", coordinates: p });
+    if (area > bestArea) {
+      best = p;
+      bestArea = area;
+    }
+  });
+  return { geom: { type: "Polygon", coordinates: best }, holes: best.length - 1, discarded: true, isEmpty: false };
+}
+
+/** Outer ring of the largest part as LatLngs (for N/E/S/W vertex markers). */
+export function outerRingLatLngs(geom) {
+  if (geom?.type === "Point") return [L.latLng(geom.coordinates[1], geom.coordinates[0])];
+  const parts = toMulti(geom);
+  if (!parts.length) return [];
+  let best = parts[0];
+  if (parts.length > 1) {
+    let bestArea = -1;
+    parts.forEach((p) => {
+      const area = geodesicAreaM2({ type: "Polygon", coordinates: p });
+      if (area > bestArea) {
+        best = p;
+        bestArea = area;
+      }
+    });
+  }
+  return ringToLatLngs(best[0] || []);
+}
+
+/** Extreme points north/east/south/west of a ring, without duplicates (reference getMainCornerPoints). */
+export function mainCornerPoints(ring) {
+  if (!ring?.length) return [];
+  let n = ring[0];
+  let s = ring[0];
+  let e = ring[0];
+  let w = ring[0];
+  ring.forEach((pt) => {
+    if (pt.lat > n.lat) n = pt;
+    if (pt.lat < s.lat) s = pt;
+    if (pt.lng > e.lng) e = pt;
+    if (pt.lng < w.lng) w = pt;
+  });
+  const uniq = [];
+  [n, e, s, w].forEach((p) => {
+    if (!uniq.some((u) => Math.abs(u.lat - p.lat) < 1e-10 && Math.abs(u.lng - p.lng) < 1e-10)) uniq.push(p);
+  });
+  return uniq;
+}
+
+/** Distance in metres from a point to a polygon's boundary (0 inside). Used by «Соединить линией». */
+export function distanceToGeomM(geom, latlng) {
+  if (geomContainsLatLng(geom, latlng)) return 0;
+  const kx = lngScale(latlng.lat);
+  const ky = M_PER_DEG_LAT;
+  let best = Infinity;
+  toMulti(geom).forEach((polygon) => {
+    polygon.forEach((ring) => {
+      for (let i = 1; i < ring.length; i += 1) {
+        const ax = (ring[i - 1][0] - latlng.lng) * kx;
+        const ay = (ring[i - 1][1] - latlng.lat) * ky;
+        const bx = (ring[i][0] - latlng.lng) * kx;
+        const by = (ring[i][1] - latlng.lat) * ky;
+        const dx = bx - ax;
+        const dy = by - ay;
+        const len2 = dx * dx + dy * dy || 1e-12;
+        const t = Math.max(0, Math.min(1, -(ax * dx + ay * dy) / len2));
+        best = Math.min(best, Math.hypot(ax + t * dx, ay + t * dy));
+      }
+    });
+  });
+  return best;
+}
+
+/** Area label as in the reference «Свойства объекта»: hectares from 0.01 ha, otherwise m². */
+export function formatAreaHa(areaM2) {
+  const ha = areaM2 / 10000;
+  return ha >= 0.01 ? `${ha.toFixed(2)} га` : `${Math.round(areaM2)} м²`;
 }

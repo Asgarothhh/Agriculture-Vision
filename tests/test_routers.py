@@ -76,6 +76,31 @@ def test_activity_list(client, auth_headers):
     assert "items" in response.json()
 
 
+def test_ui_events_are_added_to_history(client, auth_headers):
+    created = client.post(
+        "/api/v1/activity/",
+        headers=auth_headers,
+        json={"category": "map_tools", "action": "Выбран инструмент: Линейка", "payload": {"tool": "ruler"}},
+    )
+    assert created.status_code == 201, created.text
+    items = client.get("/api/v1/activity/", headers=auth_headers, params={"q": "Выбран инструмент"}).json()["items"]
+    assert items[0]["category"] == "map_tools"
+    assert items[0]["payload"] == {"tool": "ruler", "source": "ui"}
+
+    bad_category = client.post("/api/v1/activity/", headers=auth_headers, json={"category": "admin", "action": "x"})
+    assert bad_category.status_code == 422
+    blank = client.post("/api/v1/activity/", headers=auth_headers, json={"category": "account", "action": "   "})
+    assert blank.status_code == 422
+    too_big = client.post(
+        "/api/v1/activity/",
+        headers=auth_headers,
+        json={"category": "account", "action": "x", "payload": {"blob": "a" * 5000}},
+    )
+    assert too_big.status_code == 422
+    anonymous = client.post("/api/v1/activity/", json={"category": "account", "action": "x"})
+    assert anonymous.status_code in {401, 403}
+
+
 def test_activity_filters_by_several_categories(client, auth_headers):
     layer = client.post("/api/v1/layers/", headers=auth_headers, json={"name": "Фильтр", "color": "#123456"}).json()
     ring = [[27.45, 53.88], [27.46, 53.88], [27.46, 53.89], [27.45, 53.88]]
@@ -397,3 +422,46 @@ def test_tasks_calls_runtime(client, auth_headers, monkeypatch):
     assert got.status_code == 200
     assert called["upload"] >= 1
     assert called["infer"] >= 1
+
+
+def test_object_folder_and_crop_are_returned_and_exported(client, auth_headers):
+    layer = client.post("/api/v1/layers/", headers=auth_headers, json={"name": "Культуры", "color": "#00AA00"}).json()
+    geom = {"type": "Polygon", "coordinates": [[[27.0, 53.0], [27.01, 53.0], [27.01, 53.01], [27.0, 53.0]]]}
+    obj = client.post(
+        f"/api/v1/layers/{layer['id']}/objects", headers=auth_headers, json={"name": "Поле", "geom": geom}
+    ).json()
+    assert obj["folder_id"] is None
+    assert obj["crop"] is None
+
+    # В1: a single object put into a folder stays there after reload
+    folder = client.post("/api/v1/folders/", headers=auth_headers, json={"name": "Участок 1"}).json()
+    moved = client.post(f"/api/v1/folders/{folder['id']}/items", headers=auth_headers, json={"object_id": obj["id"]})
+    assert moved.status_code == 200
+    listed = client.get(f"/api/v1/layers/{layer['id']}/objects", headers=auth_headers).json()
+    assert listed[0]["folder_id"] == folder["id"]
+
+    # В2: crop set, kept when omitted, cleared by null
+    with_crop = client.patch(f"/api/v1/objects/{obj['id']}", headers=auth_headers, json={"crop": "Пшеница"})
+    assert with_crop.status_code == 200, with_crop.text
+    assert with_crop.json()["crop"] == "Пшеница"
+    renamed = client.patch(f"/api/v1/objects/{obj['id']}", headers=auth_headers, json={"name": "Поле 2"})
+    assert renamed.json()["crop"] == "Пшеница"
+    assert renamed.json()["folder_id"] == folder["id"]
+
+    exported = client.post(
+        "/api/v1/layers/export", headers=auth_headers, json={"format": "geojson", "layer_ids": [layer["id"]]}
+    )
+    assert exported.status_code == 200, exported.text
+    props = [f["properties"] for f in exported.json()["features"]]
+    assert props[0]["crop"] == "Пшеница"
+
+    cleared = client.patch(f"/api/v1/objects/{obj['id']}", headers=auth_headers, json={"crop": None})
+    assert cleared.json()["crop"] is None
+    too_long = client.patch(f"/api/v1/objects/{obj['id']}", headers=auth_headers, json={"crop": "x" * 121})
+    assert too_long.status_code == 422
+
+    detached = client.post(
+        f"/api/v1/folders/{folder['id']}/items", headers=auth_headers, json={"object_id": obj["id"], "detach": True}
+    )
+    assert detached.status_code == 200
+    assert client.get(f"/api/v1/objects/{obj['id']}", headers=auth_headers).json()["folder_id"] is None

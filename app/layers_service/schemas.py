@@ -44,6 +44,8 @@ class ObjectUpdate(BaseModel):
     name: str | None = None
     geom: dict[str, Any] | None = None
     layer_id: UUID | None = None
+    # Sent explicitly as null or "" → crop is cleared; omitted → unchanged.
+    crop: str | None = Field(default=None, max_length=120)
 
 
 class MergeRequest(BaseModel):

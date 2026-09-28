@@ -260,7 +260,7 @@ def test_yolo_classes_map_to_spec_categories():
         def __init__(self):
             self.names = names
 
-        def predict(self, image, conf, verbose):
+        def predict(self, image, conf, verbose, **kwargs):
             self.image = image
             return [Result()]
 
@@ -292,3 +292,106 @@ def test_celery_does_not_kill_worker_while_models_load():
 
     # Celery's default is 4 s; loading torch + YOLO + SegFormer takes much longer.
     assert celery_app.conf.worker_proc_alive_timeout >= 60
+
+
+def test_yolo_tile_windows_cover_image_with_overlap():
+    from app.ml_service.runtime import tile_windows
+
+    assert tile_windows(500, 600, 640) == [(0, 0, 600, 500)]
+    windows = tile_windows(2000, 3000, 640, 0.2)
+    covered = set()
+    for x0, y0, x1, y1 in windows:
+        assert x1 - x0 == 640 and y1 - y0 == 640
+        covered.update((x, y) for x in range(x0, x1, 40) for y in range(y0, y1, 40))
+    assert max(x1 for _, _, x1, _ in windows) == 3000
+    assert max(y1 for _, _, _, y1 in windows) == 2000
+    xs = sorted({x0 for x0, _, _, _ in windows})
+    assert all(b - a <= 512 for a, b in zip(xs, xs[1:]))  # 20 % overlap
+
+
+def test_yolo_train_size_reads_model_overrides():
+    from app.ml_service.runtime import YOLO_DEFAULT_IMGSZ, yolo_train_size
+
+    class M:
+        overrides = {"imgsz": 512}
+
+    class N:
+        overrides = {"imgsz": [640, 640]}
+
+    assert yolo_train_size(M()) == 512
+    assert yolo_train_size(N()) == 640
+    assert yolo_train_size(object()) == YOLO_DEFAULT_IMGSZ
+
+
+def test_merge_sliced_detections_joins_pieces_and_drops_duplicates():
+    from app.ml_service.runtime import merge_sliced_detections
+
+    def poly(cid, conf, x0, y0, x1, y1):
+        ring = [[x0, y0], [x1, y0], [x1, y1], [x0, y1], [x0, y0]]
+        return {"class_id": cid, "confidence": conf, "geometry": {"type": "Polygon", "coordinates": [ring]}}
+
+    def point(cid, conf, x, y):
+        return {"class_id": cid, "confidence": conf, "geometry": {"type": "Point", "coordinates": [x, y]}}
+
+    polygons = [
+        poly(22, 0.6, 0, 0, 520, 100),  # one field cut by the tile border…
+        poly(22, 0.8, 500, 0, 900, 100),  # …seen again by the next tile
+        poly(22, 0.5, 2000, 2000, 2100, 2100),  # a separate object stays separate
+        poly(4, 0.7, 0, 0, 520, 100),  # other class is not merged into class 22
+    ]
+    points = [point(26, 0.9, 100, 100), point(26, 0.6, 103, 101), point(26, 0.7, 400, 400)]
+    merged, kept = merge_sliced_detections(polygons, points)
+    by_class = {}
+    for item in merged:
+        by_class.setdefault(item["class_id"], []).append(item)
+    assert len(by_class[22]) == 2
+    big = next(it for it in by_class[22] if min(x for x, _ in it["geometry"]["coordinates"][0]) == 0)
+    assert max(x for x, _ in big["geometry"]["coordinates"][0]) == 900
+    assert big["confidence"] == 0.8
+    assert len(by_class[4]) == 1
+    assert sorted(p["geometry"]["coordinates"] for p in kept) == [[100, 100], [400, 400]]
+
+
+def test_run_yolo_slices_large_snapshots():
+    import numpy as np
+
+    names = {6: "water", 4: "planter_skip"}
+    square = np.array([[10, 10], [60, 10], [60, 60], [10, 60]], dtype=float)
+
+    class Boxes:
+        def __init__(self, n):
+            self.cls = np.array([6, 4][:n])
+            self.conf = np.array([0.9, 0.8][:n])
+
+    class Masks:
+        xy = [square, square + 100]
+
+    class Result:
+        boxes = Boxes(2)
+        masks = Masks()
+
+    class FakeYolo:
+        overrides = {"imgsz": 640}
+
+        def __init__(self):
+            self.names = names
+            self.calls = []
+
+        def predict(self, image, conf, verbose, **kwargs):
+            self.calls.append((len(image) if isinstance(image, list) else 1, kwargs.get("imgsz")))
+            batch = image if isinstance(image, list) else [image]
+            for crop in batch:
+                assert crop.shape[0] <= 640 and crop.shape[1] <= 640
+            return [Result() for _ in batch]
+
+    engine = ModelRuntime()
+    engine._yolo = FakeYolo()
+    payload = engine._run_yolo(np.zeros((1500, 2400, 3), dtype=np.uint8), 0.25)
+    tiles = sum(n for n, _ in engine._yolo.calls)
+    assert tiles > 4
+    assert all(imgsz == 640 for _, imgsz in engine._yolo.calls)
+    # every tile found «water» at its own offset → polygons in full-image coordinates
+    xs = [min(x for x, _ in p["geometry"]["coordinates"][0]) for p in payload["polygons"]]
+    assert max(xs) > 1500
+    assert all(p["class_id"] == 4 for p in payload["polygons"])
+    assert all(p["class_id"] == 26 for p in payload["points"])

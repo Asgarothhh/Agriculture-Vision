@@ -1,5 +1,8 @@
+// In-memory model of the user's layers, folders and objects, synced with the server.
+// Everyday edits update single records from the server answer (no full map reload);
+// the layers panel (layers/panel.js) and the map tools (map/tools.js) work on this model.
 import * as layersApi from "../api/layers.js";
-import { $, confirmModal, escapeHtml, openAppModal, closeAppModal, showToast } from "../ui.js";
+import { $, escapeHtml, showToast } from "../ui.js";
 import {
   addGeoJsonObject,
   clearFeatures,
@@ -8,18 +11,53 @@ import {
   getFeatureGroup,
   getMap,
   leafletToGeoJson,
+  removeObjectLayer,
+  setObjectLayerVisible,
 } from "../map/map.js";
 import { formatArea, geodesicAreaM2 } from "../map/geometry.js";
+import { logAction } from "../api/activity.js";
+import { formatCropHtml } from "./crops.js";
 
 let layers = [];
 let folders = [];
 let objectIndex = new Map();
-let selectedIds = [];
+let labelsGroup = null;
+// «Подписи объектов на карте» / «Координаты вершин» (Ctrl+G toggles both).
+const mapDisplay = { labels: true, coords: true };
+const recordListeners = new Set();
+const viewListeners = new Set();
 
-const CROP_DEFAULTS = ["Соя", "Свёкла", "Ячмень", "Пшеница", "Кукуруза", "Рапс", "Подсолнечник"];
+// Undo recreates deleted layers/objects/folders under new server ids: old id → new id.
+const idAlias = new Map();
+
+export function aliasId(oldId, newId) {
+  if (oldId && newId && oldId !== newId) idAlias.set(oldId, newId);
+}
+
+export function resolveId(id) {
+  let cur = id;
+  const seen = new Set();
+  while (idAlias.has(cur) && !seen.has(cur)) {
+    seen.add(cur);
+    cur = idAlias.get(cur);
+  }
+  return cur;
+}
+
+export function clearIdAliases() {
+  idAlias.clear();
+}
 
 export function getLayers() {
   return layers;
+}
+
+export function getFolders() {
+  return folders;
+}
+
+export function getFolder(id) {
+  return folders.find((f) => f.id === id) || null;
 }
 
 export function getObjectRecord(id) {
@@ -28,6 +66,10 @@ export function getObjectRecord(id) {
 
 export function allObjectRecords() {
   return [...objectIndex.values()];
+}
+
+export function recordsOfLayer(layerId) {
+  return allObjectRecords().filter((record) => record.layer.id === layerId);
 }
 
 // Settings → «Категории распознавания» checkboxes → ObjectClass ids (app/core/seed.py).
@@ -60,12 +102,69 @@ export function selectedClassIds(root = document) {
   return ids;
 }
 
-function isAuto(layer) {
-  return layer.kind === "auto";
+/** Recognition categories created by the server: cannot be renamed, recoloured or deleted. */
+export function isStandardLayer(layer) {
+  return layer?.kind === "auto";
 }
+
+/* ---------------------------------------------------------------- folders & visibility */
+
+/**
+ * Folder where the whole layer lives (reference getLayerHomeFolderId): the layer's own
+ * folder, or the common folder when every object of the layer sits in the same folder.
+ */
+export function layerHomeFolderId(layer) {
+  if (!layer) return null;
+  if (layer.folder_id) return layer.folder_id;
+  const records = recordsOfLayer(layer.id);
+  if (!records.length) return null;
+  let folder = null;
+  for (const record of records) {
+    const fid = record.obj.folder_id || null;
+    if (!fid) return null;
+    if (!folder) folder = fid;
+    else if (folder !== fid) return null;
+  }
+  return folder;
+}
+
+/** Folder an object is shown in: its layer's folder, else its own. */
+export function objectFolderId(record) {
+  return record?.layer?.folder_id || record?.obj?.folder_id || null;
+}
+
+export function isFolderVisible(folderId) {
+  if (!folderId) return true;
+  return getFolder(folderId)?.is_visible !== false;
+}
+
+/** Shown on the map: its layer is on and the folder it is in is not hidden. */
+export function isRecordVisible(record) {
+  if (!record || record.layer.is_visible === false) return false;
+  return isFolderVisible(objectFolderId(record));
+}
+
+function applyVisibility() {
+  objectIndex.forEach((record) => setObjectLayerVisible(record.leaflet, isRecordVisible(record)));
+}
+
+/** Re-applies visibility and redraws the list, legend and captions after bulk changes. */
+export function refreshModel() {
+  applyVisibility();
+  refreshViews();
+  notifyRecords();
+}
+
+/* ---------------------------------------------------------------- loading */
 
 let loadSeq = 0;
 
+/**
+ * Full load from the server — only at login / session restore / after bulk changes
+ * (segmentation results, import). Everyday edits update single records instead.
+ * Objects of hidden layers are loaded too (kept off the map), like the reference keeps
+ * them in memory: counters, legend and undo need them.
+ */
 export async function loadMapData() {
   // Overlapping reloads (quick clicks) must not both draw: only the latest one renders.
   const seq = ++loadSeq;
@@ -73,7 +172,6 @@ export async function loadMapData() {
   const nextFolders = await layersApi.listFolders();
   const perLayer = [];
   for (const layer of nextLayers) {
-    if (layer.is_visible === false) continue;
     perLayer.push([layer, await layersApi.listLayerObjects(layer.id)]);
     if (seq !== loadSeq) return;
   }
@@ -83,238 +181,371 @@ export async function loadMapData() {
   clearFeatures();
   objectIndex = new Map();
   for (const [layer, objects] of perLayer) {
-    for (const obj of objects) {
-      const leaflet = addGeoJsonObject({ ...obj, layer_id: layer.id }, styleFor(layer));
-      objectIndex.set(obj.id, { obj, layer, leaflet });
-    }
+    for (const obj of objects) objectIndex.set(obj.id, buildRecord(layer, obj));
   }
-  renderLayersList();
-  renderLegend();
-  populateCropSelect();
+  refreshViews();
+  notifyRecords();
 }
 
-function styleFor(layer) {
+/** Base style of a layer's objects; point objects get a denser fill (+20 %, as in the reference). */
+export function styleFor(layer) {
+  const fillOpacity = Number(localStorage.getItem("ttz_fill_opacity") || $("opt-fill-opacity")?.value || 35) / 100;
   return {
     color: layer.color || "#43A047",
     weight: Number(localStorage.getItem("ttz_line_width") || $("opt-line-width")?.value || 2),
-    fillOpacity: Number(localStorage.getItem("ttz_fill_opacity") || $("opt-fill-opacity")?.value || 35) / 100,
+    fillOpacity,
+    pointFillOpacity: Math.min(0.9, fillOpacity + 0.2),
     pointSize: Number(localStorage.getItem("ttz_point_size") || $("opt-point-size")?.value || 5),
   };
 }
 
-function objectCount() {
-  return objectIndex.size;
+export function coordColor() {
+  return $("opt-coord-color")?.value || "#ff3366";
 }
 
-function layerCountLabel(layer) {
+function buildRecord(layer, obj) {
+  const record = { obj: { ...obj, layer_id: layer.id }, layer, leaflet: null };
+  record.leaflet = addGeoJsonObject(record.obj, styleFor(layer), { visible: isRecordVisible(record) });
+  return record;
+}
+
+/** Tools subscribe to re-apply selection styling after records are rebuilt. */
+export function onRecordsChanged(listener) {
+  recordListeners.add(listener);
+  return () => recordListeners.delete(listener);
+}
+
+function notifyRecords() {
+  recordListeners.forEach((listener) => {
+    try {
+      listener();
+    } catch {
+      /* a broken listener must not stop the others */
+    }
+  });
+}
+
+/** The layers panel re-renders on every model change. */
+export function onViewsRefresh(listener) {
+  viewListeners.add(listener);
+  return () => viewListeners.delete(listener);
+}
+
+export function refreshViews() {
+  viewListeners.forEach((listener) => {
+    try {
+      listener();
+    } catch (err) {
+      console.error(err);
+    }
+  });
+  renderLegend();
+  renderFieldLabels();
+  populateDrawLayerSelect();
+}
+
+export function getLayer(layerId) {
+  return layers.find((l) => l.id === layerId) || null;
+}
+
+/* ---------------------------------------------------------------- objects */
+
+/** Puts a server object into the model (new or changed) without reloading the map. */
+export function upsertObject(obj) {
+  const layer = getLayer(obj.layer_id);
+  if (!layer) return null;
+  const previous = objectIndex.get(obj.id);
+  if (previous) removeObjectLayer(previous.leaflet);
+  const record = buildRecord(layer, obj);
+  objectIndex.set(obj.id, record);
+  refreshViews();
+  notifyRecords();
+  return record;
+}
+
+export function removeObject(id) {
+  const record = objectIndex.get(id);
+  if (!record) return;
+  removeObjectLayer(record.leaflet);
+  objectIndex.delete(id);
+  refreshViews();
+  notifyRecords();
+}
+
+/** Server operations that update the model with the server's answer (no full reload). */
+export async function createObjectOnServer(layerId, payload) {
+  const created = await layersApi.addObject(layerId, payload);
+  upsertObject(created);
+  return created;
+}
+
+export async function patchObjectOnServer(id, patch) {
+  const updated = await layersApi.patchObject(id, patch);
+  upsertObject(updated);
+  return updated;
+}
+
+export async function deleteObjectOnServer(id) {
+  await layersApi.deleteObject(id);
+  removeObject(id);
+}
+
+/** POST /objects/merge: the server keeps the first object (new geometry) and deletes the rest. */
+export async function mergeObjectsOnServer(ids, geom) {
+  const merged = await layersApi.mergeObjects(ids, geom);
+  ids.slice(1).forEach((id) => {
+    const record = objectIndex.get(id);
+    if (record) removeObjectLayer(record.leaflet);
+    objectIndex.delete(id);
+  });
+  upsertObject(merged);
+  return merged;
+}
+
+/* ---------------------------------------------------------------- layers */
+
+function restyleLayer(layerId) {
+  objectIndex.forEach((record, id) => {
+    if (record.layer.id !== layerId) return;
+    removeObjectLayer(record.leaflet);
+    objectIndex.set(id, buildRecord(record.layer, record.obj));
+  });
+}
+
+export async function createLayerOnServer({ name, color = "#3388ff", folderId = null }) {
+  const created = await layersApi.createLayer({ name, color });
+  let layer = { ...created, is_visible: created.is_visible !== false };
+  if (folderId) layer = { ...layer, ...(await layersApi.patchLayer(created.id, { folder_id: folderId })) };
+  layers = [...layers, layer];
+  refreshViews();
+  logAction("tool", `Создан новый слой «${name}»`);
+  return layer;
+}
+
+/** «+ Новый слой…» in the draw layer list. */
+export function createLayerQuick(name, color = "#3388ff") {
+  return createLayerOnServer({ name, color });
+}
+
+/** PATCH /layers/{id} and apply the answer to the model (colour restyles its objects). */
+export async function patchLayerOnServer(layerId, patch) {
+  const layer = getLayer(layerId);
+  if (!layer) return null;
+  const updated = await layersApi.patchLayer(layerId, patch);
+  const colorChanged = updated.color && updated.color !== layer.color;
+  Object.assign(layer, updated);
+  if (colorChanged) restyleLayer(layerId);
+  applyVisibility();
+  refreshViews();
+  notifyRecords();
+  return layer;
+}
+
+export async function deleteLayerOnServer(layerId) {
+  await layersApi.deleteLayer(layerId);
+  objectIndex.forEach((record, id) => {
+    if (record.layer.id !== layerId) return;
+    removeObjectLayer(record.leaflet);
+    objectIndex.delete(id);
+  });
+  layers = layers.filter((l) => l.id !== layerId);
+  refreshViews();
+  notifyRecords();
+}
+
+/** Layer checkbox: hide/show at once, then persist; roll back if the server refuses. */
+export async function setLayerVisibility(layerId, visible) {
+  const layer = getLayer(layerId);
+  if (!layer) return;
+  const apply = (on) => {
+    layer.is_visible = on;
+    applyVisibility();
+    refreshViews();
+    notifyRecords();
+  };
+  apply(visible);
+  try {
+    await layersApi.patchLayer(layerId, { is_visible: visible });
+    logAction("tool", `Изменена видимость слоя «${layer.name}»`);
+  } catch (err) {
+    apply(!visible);
+    throw err;
+  }
+}
+
+/* ---------------------------------------------------------------- folders */
+
+export async function createFolderOnServer(name) {
+  const created = await layersApi.createFolder(name);
+  folders = [...folders, { ...created, is_visible: created.is_visible !== false }];
+  refreshViews();
+  return created;
+}
+
+export async function patchFolderOnServer(folderId, patch) {
+  const folder = getFolder(folderId);
+  if (!folder) return null;
+  const updated = await layersApi.patchFolder(folderId, patch);
+  Object.assign(folder, updated);
+  applyVisibility();
+  refreshViews();
+  notifyRecords();
+  return folder;
+}
+
+/** DELETE /folders/{id}: the server takes its layers and objects out of it (they stay on the map). */
+export async function deleteFolderOnServer(folderId) {
+  await layersApi.deleteFolder(folderId);
+  layers.forEach((l) => {
+    if (l.folder_id === folderId) l.folder_id = null;
+  });
+  objectIndex.forEach((record) => {
+    if (record.obj.folder_id === folderId) record.obj.folder_id = null;
+  });
+  folders = folders.filter((f) => f.id !== folderId);
+  applyVisibility();
+  refreshViews();
+  notifyRecords();
+}
+
+/** POST /folders/{id}/items — a whole layer or one object into a folder (folderId null = out of it). */
+export async function moveToFolderOnServer({ layerId = null, objectId = null, folderId = null, fromFolderId = null }) {
+  const target = folderId || fromFolderId;
+  if (!target) return;
+  const body = layerId ? { layer_id: layerId } : { object_id: objectId };
+  if (!folderId) body.detach = true;
+  await layersApi.moveFolderItem(target, body);
+  if (layerId) {
+    const layer = getLayer(layerId);
+    if (layer) layer.folder_id = folderId;
+  } else {
+    const record = objectIndex.get(objectId);
+    if (record) record.obj.folder_id = folderId;
+  }
+  applyVisibility();
+  refreshViews();
+  notifyRecords();
+}
+
+/* ---------------------------------------------------------------- captions & legend */
+
+export function getMapDisplay() {
+  return { ...mapDisplay };
+}
+
+/** Captions / vertex coordinates on the map (checkboxes and Ctrl+G). */
+export function setMapDisplayOption(key, value) {
+  if (!(key in mapDisplay)) return;
+  mapDisplay[key] = !!value;
+  if ($("opt-field-labels")) $("opt-field-labels").checked = mapDisplay.labels;
+  if ($("opt-field-coords")) $("opt-field-coords").checked = mapDisplay.coords;
+  renderFieldLabels();
+  notifyRecords();
+  const label = key === "labels" ? "подписи объектов" : "координаты вершин";
+  logAction("map", value ? `Включены ${label} на карте` : `Скрыты ${label} на карте`);
+}
+
+function objectCenter(leaflet) {
+  let center = null;
+  leaflet?.eachLayer?.((part) => {
+    if (center) return;
+    if (part.getBounds) center = part.getBounds().getCenter();
+    else if (part.getLatLng) center = part.getLatLng();
+  });
+  return center;
+}
+
+/** Captions in the middle of each shown object: name + crop, like the reference. */
+export function renderFieldLabels() {
+  const map = getMap();
+  if (!map) return;
+  if (!labelsGroup) labelsGroup = L.layerGroup().addTo(map);
+  labelsGroup.clearLayers();
+  if (!mapDisplay.labels) return;
+  objectIndex.forEach((record) => {
+    if (!isRecordVisible(record) || !record.obj.name) return;
+    const center = objectCenter(record.leaflet);
+    if (!center) return;
+    let html = `<strong>${escapeHtml(record.obj.name)}</strong>`;
+    if (record.obj.crop) html += `<span>${formatCropHtml(record.obj.crop)}</span>`;
+    labelsGroup.addLayer(
+      L.marker(center, {
+        icon: L.divIcon({ className: "field-map-label", html, iconSize: null }),
+        interactive: false,
+      }),
+    );
+  });
+}
+
+export function layerObjectCount(layer) {
   let n = 0;
   objectIndex.forEach((item) => {
     if (item.layer.id === layer.id) n += 1;
   });
-  return n || Number(layer.objects_count || 0);
+  return n;
 }
 
-export function renderLayersList(filter = "") {
-  const list = $("layers-list");
-  const foldersBox = $("folders-list");
-  if (!list) return;
-  const q = (filter || $("layer-search")?.value || "").toLowerCase();
-  const autoLayers = layers.filter((l) => isAuto(l) && (!q || l.name.toLowerCase().includes(q)));
-  const userLayers = layers.filter((l) => !isAuto(l) && (!q || l.name.toLowerCase().includes(q)));
-
-  if (foldersBox) {
-    foldersBox.innerHTML = folders
-      .map((folder) => {
-        const kids = userLayers.filter((l) => l.folder_id === folder.id);
-        return `
-      <div class="folder-block" data-folder-id="${folder.id}">
-        <div class="layer-item" data-folder-id="${folder.id}">
-          <button type="button" class="mini-btn collapse-icon" data-act="toggle-folder" data-id="${folder.id}">▾</button>
-          <span>📁 ${escapeHtml(folder.name)}</span>
-          <div class="layer-item-actions">
-            <button type="button" class="mini-btn" data-act="ren-folder" data-id="${folder.id}" title="Переименовать">✎</button>
-            <button type="button" class="mini-btn" data-act="del-folder" data-id="${folder.id}" title="Удалить">✕</button>
-          </div>
-        </div>
-        <div class="folder-children" data-folder-children="${folder.id}">
-          ${kids.map((layer) => layerRow(layer, false)).join("")}
-        </div>
-      </div>`;
-      })
-      .join("");
-  }
-
-  const loose = userLayers.filter((l) => !l.folder_id);
-  list.innerHTML = autoLayers.map((layer) => layerRow(layer, true)).join("");
-  const userBox = $("user-layers-list");
-  if (userBox) userBox.innerHTML = loose.map((layer) => layerRow(layer, false)).join("");
-  if ($("layers-count-badge")) $("layers-count-badge").textContent = `${objectCount()} объектов`;
-  bindLayerActions();
-  populateDrawLayerSelect();
-}
-
-function layerRow(layer, locked) {
-  const count = layerCountLabel(layer);
-  return `
-    <div class="layer-item ${layer.is_visible === false ? "off" : ""} ${locked ? "locked" : ""}" data-layer-id="${layer.id}">
-      <label>
-        <input type="checkbox" data-act="vis" data-id="${layer.id}" ${layer.is_visible === false ? "" : "checked"}>
-        <span style="color:${escapeHtml(layer.color)}">●</span>
-        <span class="layer-name">${escapeHtml(layer.name)}</span>
-        ${locked ? "<small>auto</small>" : ""}
-        <small class="layer-count">${count}</small>
-      </label>
-      <div class="layer-item-actions">
-        ${locked ? "" : `<button type="button" class="mini-btn" data-act="edit-layer" data-id="${layer.id}" title="Изменить">✎</button>`}
-        ${locked ? "" : `<button type="button" class="mini-btn" data-act="del-layer" data-id="${layer.id}" title="Удалить">✕</button>`}
-      </div>
-    </div>`;
-}
-
-function bindLayerActions() {
-  document.querySelectorAll("#layers-list [data-act], #folders-list [data-act], #user-layers-list [data-act]").forEach((el) => {
-    // A checkbox fires both click and change: listening to both sent two PATCH requests
-    // and started two overlapping map reloads (duplicated shapes).
-    el.addEventListener(el.type === "checkbox" ? "change" : "click", onLayerAction);
+/**
+ * Legend entries as in the reference: a folder holding layers with objects is one entry
+ * (folder name, colour of its first such layer); then every loose layer that has objects.
+ * Hidden layers/folders stay listed, exactly as in the reference (user decision).
+ */
+export function legendItems(allLayers, allFolders, countOf) {
+  const withObjects = allLayers.filter((l) => countOf(l) > 0);
+  const items = [];
+  allFolders.forEach((folder) => {
+    const children = withObjects.filter((l) => l.folder_id === folder.id);
+    if (children.length) items.push({ name: folder.name, color: children[0].color });
   });
+  const folderIds = new Set(allFolders.map((folder) => folder.id));
+  withObjects
+    .filter((l) => !l.folder_id || !folderIds.has(l.folder_id))
+    .forEach((l) => items.push({ name: l.name, color: l.color }));
+  return items;
 }
 
-async function onLayerAction(event) {
-  const act = event.currentTarget.getAttribute("data-act");
-  const id = event.currentTarget.getAttribute("data-id");
-  if (act === "vis") event.stopPropagation();
-  try {
-    if (act === "vis") {
-      await layersApi.patchLayer(id, { is_visible: event.currentTarget.checked });
-      await loadMapData();
-    } else if (act === "del-layer") {
-      const layer = layers.find((l) => l.id === id);
-      const ok = await confirmModal({
-        title: "Удалить слой",
-        bodyHtml: `<p>Удалить слой «${escapeHtml(layer?.name || "")}» со всеми объектами?</p>`,
-        confirmLabel: "Удалить",
-        danger: true,
-      });
-      if (!ok) return;
-      await layersApi.deleteLayer(id);
-      await loadMapData();
-    } else if (act === "del-folder") {
-      const folder = folders.find((f) => f.id === id);
-      const ok = await confirmModal({
-        title: "Удалить папку",
-        bodyHtml: `<p>Удалить папку «${escapeHtml(folder?.name || "")}»? Слои и объекты останутся на карте.</p>`,
-        confirmLabel: "Удалить",
-        danger: true,
-      });
-      if (!ok) return;
-      await layersApi.deleteFolder(id);
-      await loadMapData();
-    } else if (act === "edit-layer") {
-      const layer = layers.find((l) => l.id === id);
-      openLayerModal(layer);
-    } else if (act === "ren-folder") {
-      const folder = folders.find((f) => f.id === id);
-      openFolderModal(folder);
-    } else if (act === "toggle-folder") {
-      const box = document.querySelector(`[data-folder-children="${id}"]`);
-      box?.classList.toggle("collapsed");
-    }
-  } catch (err) {
-    showToast(err.message, true);
-  }
+function renderLegend() {
+  const el = $("legend");
+  if (!el) return;
+  el.innerHTML = legendItems(layers, folders, layerObjectCount)
+    .map(
+      (item) => `<span class="legend-item" title="${escapeHtml(item.name)}">
+        <span class="legend-swatch" style="background:${escapeHtml(item.color)}"></span>
+        <span class="legend-text">${escapeHtml(item.name)}</span>
+      </span>`,
+    )
+    .join("");
 }
 
-export function filterLayers(value) {
-  renderLayersList(value);
-}
-
-function folderOptions(selectedId) {
-  return `<option value="">Без папки</option>${folders
-    .map((f) => `<option value="${f.id}" ${f.id === selectedId ? "selected" : ""}>${escapeHtml(f.name)}</option>`)
-    .join("")}`;
-}
-
-function openLayerModal(existing) {
-  openAppModal({
-    title: existing ? "Слой" : "Новый слой",
-    bodyHtml: `
-      <div class="input-group"><label>НАЗВАНИЕ</label><input id="modal-layer-name" class="search-input" value="${escapeHtml(existing?.name || "")}"></div>
-      <div class="input-group"><label>ЦВЕТ</label><input id="modal-layer-color" type="color" class="color-input" value="${escapeHtml(existing?.color || "#3388ff")}"></div>
-      <div class="input-group"><label>ПАПКА</label><select id="modal-layer-folder" class="search-input">${folderOptions(existing?.folder_id)}</select></div>
-    `,
-    actions: [
-      { label: "Отмена", onClick: closeAppModal },
-      {
-        label: existing ? "Сохранить" : "Создать",
-        className: "mini-btn mini-btn-red",
-        onClick: async () => {
-          const name = $("modal-layer-name").value.trim();
-          if (!name) return;
-          const color = $("modal-layer-color").value;
-          const folder_id = $("modal-layer-folder").value || null;
-          try {
-            if (existing) await layersApi.patchLayer(existing.id, { name, color, folder_id });
-            else {
-              const created = await layersApi.createLayer({ name, color });
-              if (folder_id && created?.id) await layersApi.patchLayer(created.id, { folder_id });
-            }
-            closeAppModal();
-            await loadMapData();
-          } catch (err) {
-            showToast(err.message, true);
-          }
-        },
-      },
-    ],
-  });
-}
-
-function openFolderModal(existing) {
-  openAppModal({
-    title: existing ? "Папка" : "Новая папка",
-    bodyHtml: `<div class="input-group"><label>НАЗВАНИЕ</label><input id="modal-folder-name" class="search-input" value="${escapeHtml(existing?.name || "")}"></div>`,
-    actions: [
-      { label: "Отмена", onClick: closeAppModal },
-      {
-        label: existing ? "Сохранить" : "Создать",
-        className: "mini-btn mini-btn-red",
-        onClick: async () => {
-          const name = $("modal-folder-name").value.trim();
-          if (!name) return;
-          try {
-            if (existing) await layersApi.patchFolder(existing.id, { name });
-            else await layersApi.createFolder(name);
-            closeAppModal();
-            await loadMapData();
-          } catch (err) {
-            showToast(err.message, true);
-          }
-        },
-      },
-    ],
-  });
-}
-
-export async function toggleCreateLayerForm() {
-  openLayerModal(null);
-}
-
-export async function createFolder() {
-  openFolderModal(null);
-}
+/* ---------------------------------------------------------------- drawing layer */
 
 export function populateDrawLayerSelect() {
   const select = $("draw-layer-select");
   if (!select) return;
   const previous = select.value;
   // Own layers first: a new drawing defaults to a user layer, not a recognition category.
-  const ordered = [...layers.filter((l) => !isAuto(l)), ...layers.filter(isAuto)];
-  select.innerHTML = ordered.map((l) => `<option value="${l.id}">${escapeHtml(l.name)}</option>`).join("");
+  const ordered = [...layers.filter((l) => !isStandardLayer(l)), ...layers.filter(isStandardLayer)];
+  select.innerHTML =
+    ordered.map((l) => `<option value="${l.id}">${escapeHtml(l.name)}</option>`).join("") +
+    '<option value="__new__">+ Новый слой…</option>';
   if (previous && ordered.some((l) => l.id === previous)) select.value = previous;
+  else if (defaultDrawLayer()) select.value = defaultDrawLayer().id;
+}
+
+/** Own layer first; without own layers — «Культурные растения» (class 2), like the reference default. */
+function defaultDrawLayer() {
+  return (
+    layers.find((l) => !isStandardLayer(l)) ||
+    layers.find((l) => isStandardLayer(l) && l.class_id === 2) ||
+    layers[0] ||
+    null
+  );
 }
 
 export function currentDrawLayerId() {
-  return $("draw-layer-select")?.value || layers.find((l) => !isAuto(l))?.id || layers[0]?.id;
+  const value = $("draw-layer-select")?.value;
+  if (value && value !== "__new__") return value;
+  return defaultDrawLayer()?.id;
 }
 
 export async function persistDrawnLayer(leafletLayer, origin = "manual") {
@@ -325,70 +556,16 @@ export async function persistDrawnLayer(leafletLayer, origin = "manual") {
   }
   const geom = leafletToGeoJson(leafletLayer);
   try {
-    const created = await layersApi.addObject(layerId, { name: "", geom, origin });
+    const created = await createObjectOnServer(layerId, { name: "", geom, origin });
     getMap()?.removeLayer(leafletLayer);
-    await loadMapData();
     return created;
   } catch (err) {
     showToast(err.message, true);
   }
 }
 
-export async function patchObjectGeom(id, geom) {
-  await layersApi.patchObject(id, { geom });
-  await loadMapData();
-}
-
-export function highlightObjects(ids) {
-  selectedIds = ids;
-  objectIndex.forEach((item) => {
-    item.leaflet?.eachLayer?.((part) => {
-      const on = ids.includes(item.obj.id);
-      part.setStyle?.({ weight: on ? 4 : styleFor(item.layer).weight, color: on ? "#e14059" : item.layer.color });
-    });
-  });
-}
-
-export function startCreateArea() {
-  populateDrawLayerSelect();
-  $("edit-area-controls").style.display = "block";
-  $("merge-mode-panel").style.display = "none";
-  $("more-menu")?.classList.add("active");
-  $("create-area-item")?.classList.add("active");
-  $("polygon-area-item")?.classList.remove("active");
-  $("edit-area-item")?.classList.remove("active");
-  $("merge-menu-item")?.classList.remove("active");
-  import("../map/tools.js").then((mod) => {
-    mod.setPaintIntent("create");
-    mod.setEditDrawMode("brush");
-  });
-  showToast("Кисть: зажмите ЛКМ. Замкните к началу — полигон; иначе — полоса. «По точкам» — прямые по вершинам.");
-}
-
-export function startPolygonArea() {
-  import("../map/tools.js").then((mod) => mod.startPolygonMode());
-}
-
 export function startAoiSelection() {
   enableAoiDraw(() => showToast("Область выделена"));
-}
-
-export function startMergePolygonsMode() {
-  $("more-menu")?.classList.add("active");
-  $("merge-menu-item")?.classList.add("active");
-  $("create-area-item")?.classList.remove("active");
-  $("polygon-area-item")?.classList.remove("active");
-  $("edit-area-item")?.classList.remove("active");
-  import("../map/tools.js").then((mod) => mod.startMergeMode());
-}
-
-export async function confirmMergePolygons() {
-  const mod = await import("../map/tools.js");
-  await mod.mergeSelectedPair();
-}
-
-export function cancelMergeMode() {
-  import("../map/tools.js").then((mod) => mod.cancelMergeMode());
 }
 
 export async function importLayerFile(file) {
@@ -403,96 +580,7 @@ export async function importLayerFile(file) {
   }
 }
 
-function renderLegend() {
-  const el = $("legend");
-  if (!el) return;
-  el.innerHTML = layers
-    .filter((l) => l.is_visible !== false && layerCountLabel(l) > 0)
-    .map(
-      (l) =>
-        `<span class="legend-item" title="${escapeHtml(l.name)}"><i style="background:${escapeHtml(l.color)}"></i>${escapeHtml(l.name)}</span>`,
-    )
-    .join("");
-}
-
-export function bindMapClicksForDetails() {
-  /* selection handled by map tools */
-}
-
-export async function saveFieldName() {
-  const id = $("field-name-input")?.dataset.objectId;
-  if (!id) return;
-  try {
-    await layersApi.patchObject(id, { name: $("field-name-input").value });
-    await loadMapData();
-  } catch (err) {
-    showToast(err.message, true);
-  }
-}
-
-export function cropStorageKey() {
-  return "ttz_custom_crops";
-}
-
-function customCrops() {
-  try {
-    return JSON.parse(localStorage.getItem(cropStorageKey()) || "[]");
-  } catch {
-    return [];
-  }
-}
-
-export function populateCropSelect() {
-  const select = $("field-crop-select");
-  if (!select) return;
-  const all = [...CROP_DEFAULTS, ...customCrops()];
-  select.innerHTML = `<option value="">—</option>${all
-    .map((c) => `<option value="${escapeHtml(c)}">${escapeHtml(c)}</option>`)
-    .join("")}<option value="__custom__">⚙ Свои культуры…</option>`;
-}
-
-export function onFieldCropSelect(value) {
-  if (value === "__custom__") {
-    openCropsModal();
-    return;
-  }
-  const id = $("field-name-input")?.dataset.objectId;
-  if (!id) return;
-  localStorage.setItem(`ttz_crop_${id}`, value);
-}
-
-function openCropsModal() {
-  const list = customCrops();
-  openAppModal({
-    title: "Свои культуры",
-    bodyHtml: `
-      <div class="input-group"><input id="modal-crop-name" class="search-input" placeholder="Новая культура"></div>
-      <div id="modal-crop-list">${list.map((c) => `<div class="layer-item">${escapeHtml(c)} <button type="button" class="mini-btn" data-crop="${escapeHtml(c)}">✕</button></div>`).join("")}</div>
-    `,
-    actions: [
-      { label: "Закрыть", onClick: closeAppModal },
-      {
-        label: "+ Добавить культуру",
-        className: "mini-btn mini-btn-red",
-        onClick: () => {
-          const name = $("modal-crop-name").value.trim();
-          if (!name) return;
-          const next = [...customCrops(), name];
-          localStorage.setItem(cropStorageKey(), JSON.stringify(next));
-          closeAppModal();
-          populateCropSelect();
-        },
-      },
-    ],
-  });
-  $("modal-crop-list")?.querySelectorAll("[data-crop]").forEach((btn) => {
-    btn.onclick = () => {
-      const next = customCrops().filter((c) => c !== btn.dataset.crop);
-      localStorage.setItem(cropStorageKey(), JSON.stringify(next));
-      btn.parentElement.remove();
-    };
-  });
-}
+/* ---------------------------------------------------------------- display settings (stage 5) */
 
 export function applyDisplaySettings() {
   applyLiveStyles();
@@ -503,18 +591,9 @@ export function applyLiveStyles() {
   localStorage.setItem("ttz_line_width", $("opt-line-width")?.value || "2");
   localStorage.setItem("ttz_fill_opacity", $("opt-fill-opacity")?.value || "35");
   localStorage.setItem("ttz_coord_color", $("opt-coord-color")?.value || "#ff3366");
-  objectIndex.forEach((item) => {
-    const st = styleFor(item.layer);
-    item.leaflet?.eachLayer?.((part) => {
-      part.setStyle?.({
-        weight: st.weight,
-        fillOpacity: st.fillOpacity,
-        color: item.layer.color,
-        radius: st.pointSize,
-      });
-      if (typeof part.setRadius === "function") part.setRadius(st.pointSize);
-    });
-  });
+  layers.forEach((layer) => restyleLayer(layer.id));
+  renderFieldLabels();
+  notifyRecords();
 }
 
 export function restoreDisplaySettings() {

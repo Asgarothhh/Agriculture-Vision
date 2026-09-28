@@ -1,88 +1,85 @@
-import { $, showToast } from "../ui.js";
-import { cycleVisitedBounds, getMap, visitedCount } from "./map.js";
+import { $, closeAppModal } from "../ui.js";
+import { getMap } from "./map.js";
 import {
-  activateMapTool,
-  cancelMergeMode,
+  cancelActiveTool,
   currentMapTool,
-  deleteAtPriority,
-  finishEditAreaMode,
+  deleteCurrentMapSelection,
   finishPolygonDraw,
-  mergeSelectedPair,
-  getSelected,
+  jumpToSelectionHistory,
+  mergeHotkey,
   toggleLabelsAndCoords,
 } from "./tools.js";
 import { redoLast, undoLast } from "./undo.js";
 
 let bound = false;
 
+function isShown(el) {
+  return !!el && el.style.display !== "none" && el.style.display !== "";
+}
+
+/** Global map hotkeys, as in the reference (onGlobalKeyDown). */
 export function bindHotkeys() {
   if (bound) return;
   bound = true;
   document.addEventListener(
     "keydown",
-    async (e) => {
-    const tag = (e.target?.tagName || "").toLowerCase();
-    const typing = tag === "input" || tag === "textarea" || tag === "select";
-    const key = (e.code || "").toLowerCase();
-    if (e.key === "Escape") {
-      if (document.getElementById("app-modal")?.style.display === "flex") {
-        document.getElementById("app-modal").style.display = "none";
+    (e) => {
+      const typing = !!e.target?.matches?.("input, textarea, select, [contenteditable='true']");
+      if (e.key === "Escape") {
+        const modal = $("app-modal");
+        if (isShown(modal)) {
+          e.preventDefault();
+          closeAppModal();
+          return;
+        }
+        const picker = $("folder-picker");
+        if (isShown(picker)) {
+          e.preventDefault();
+          picker.style.display = "none";
+          return;
+        }
+        if (typing) return;
         e.preventDefault();
+        cancelActiveTool();
         return;
       }
-      if (document.getElementById("folder-picker")?.style.display === "block") {
-        document.getElementById("folder-picker").style.display = "none";
+      if (typing) return;
+      // Keys below act on the map only: not while a dialog is open or the map screen is hidden.
+      if (isShown($("app-modal")) || !getMap() || $("view-map")?.style.display === "none") return;
+      const key = (e.key || "").toLowerCase();
+      const code = e.code || "";
+      const mod = e.ctrlKey || e.metaKey;
+      if (e.key === "Enter" && currentMapTool() === "polygon") {
         e.preventDefault();
+        finishPolygonDraw();
         return;
       }
-      if (!typing) {
-        finishEditAreaMode();
-        cancelMergeMode();
-        activateMapTool("select");
+      if (mod && (key === "z" || key === "я" || code === "KeyZ")) {
         e.preventDefault();
-      }
-      return;
-    }
-    if (!typing && (e.key === "Enter" || e.code === "Enter") && currentMapTool() === "polygon") {
-      e.preventDefault();
-      await finishPolygonDraw();
-      return;
-    }
-    if ((e.ctrlKey || e.metaKey) && key === "keyz") {
-      e.preventDefault();
-      if (e.shiftKey) {
-        const ok = await redoLast();
-        if (!ok) showToast("Нечего повторить");
-      } else {
-        const ok = await undoLast();
-        if (!ok) showToast("Нечего отменять");
-      }
-      return;
-    }
-    if ((e.ctrlKey || e.metaKey) && key === "keyg") {
-      e.preventDefault();
-      toggleLabelsAndCoords();
-      return;
-    }
-    if ((e.ctrlKey || e.metaKey) && key === "keym") {
-      e.preventDefault();
-      if (getSelected().length !== 2) {
-        showToast("За раз можно объединить только 2 области", true);
+        if (e.shiftKey) redoLast();
+        else undoLast();
         return;
       }
-      await mergeSelectedPair();
-      return;
-    }
-    if (!typing && (e.key === "j" || e.key === "J") && !e.ctrlKey) {
-      const idx = cycleVisitedBounds();
-      const total = visitedCount();
-      if (total) showToast(`Область ${idx + 1} из ${total} (от недавней к первой)`);
-      return;
-    }
-    if (!typing && (e.key === "Delete" || e.key === "Backspace")) {
-      e.preventDefault();
-      await deleteAtPriority();
-    }
+      if (mod && (key === "g" || key === "п" || code === "KeyG")) {
+        e.preventDefault();
+        toggleLabelsAndCoords();
+        return;
+      }
+      if (mod && (key === "m" || key === "ь" || code === "KeyM")) {
+        e.preventDefault();
+        mergeHotkey();
+        return;
+      }
+      // Without Ctrl: Chrome/Edge reserve Ctrl+J for Downloads.
+      if ((key === "j" || key === "о" || code === "KeyJ") && !mod && !e.altKey) {
+        e.preventDefault();
+        jumpToSelectionHistory();
+        return;
+      }
+      if (e.key === "Delete" || e.key === "Backspace") {
+        e.preventDefault();
+        deleteCurrentMapSelection();
+      }
     },
     true,
   );

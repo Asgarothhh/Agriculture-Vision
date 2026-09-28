@@ -30,6 +30,7 @@ def objects_to_geojson(layers: Iterable[dict[str, Any]]) -> dict[str, Any]:
                         "is_point": obj["is_point"],
                         "origin": obj["origin"],
                         "area_ha": obj.get("area_ha"),
+                        "crop": obj.get("crop"),
                     },
                 }
             )
@@ -100,6 +101,7 @@ def geojson_to_shapefile_zip(geojson: dict[str, Any]) -> bytes:
                 "origin": str(props.get("origin") or "")[:16],
                 "is_point": bool(props.get("is_point")),
                 "number": int(props.get("number") or 0),
+                "crop": str(props.get("crop") or "")[:50],
                 "geometry": geom,
             }
         )

@@ -72,6 +72,27 @@ export function getActiveBasemapTileUrl(z, x, y) {
   return dzzExportImageUrl(root, z, x, y);
 }
 
+// Catalog names of dzz.by coverage → human-readable titles (same table as the reference UI).
+const DZZ_SITE_LABELS = {
+  berestovica_polya: "Берестовица",
+  Berezovski_rn_polya: "Берёзовский р-н",
+  myadel_polya: "Мядель",
+  Smolevichy_polya: "Смолевичи",
+};
+
+export function humanizeDzzSiteName(name) {
+  if (DZZ_SITE_LABELS[name]) return DZZ_SITE_LABELS[name];
+  return String(name || "Участок")
+    .replace(/_polya$/i, "")
+    .replace(/_rn_/gi, " р-н ")
+    .replace(/_/g, " ")
+    .trim();
+}
+
+export function formatDzzCoords(lat, lng) {
+  return `${Number(lat).toFixed(5)}°N ${Number(lng).toFixed(5)}°E`;
+}
+
 export function parseDzzSites(payload) {
   const features = payload?.features;
   if (!Array.isArray(features)) return [];
@@ -95,7 +116,7 @@ export function parseDzzSites(payload) {
         const lat = Number(geom.y);
         const lon = Number(geom.x);
         const name = String(attrs.Name || attrs.name || `Участок ${idx + 1}`);
-        return { id: attrs.OBJECTID || idx, name, title: name, center: [lat, lon], bounds: [lon, lat, lon, lat] };
+        return { id: attrs.OBJECTID || idx, name, title: humanizeDzzSiteName(name), center: [lat, lon], bounds: [lon, lat, lon, lat] };
       }
       const west = Math.min(...xs);
       const east = Math.max(...xs);
@@ -105,7 +126,7 @@ export function parseDzzSites(payload) {
       return {
         id: attrs.OBJECTID || attrs.FID || idx,
         name,
-        title: name,
+        title: humanizeDzzSiteName(name),
         center: [(south + north) / 2, (west + east) / 2],
         bounds: [west, south, east, north],
       };

@@ -70,6 +70,8 @@ class LayerObject(Base):
     area_ha: Mapped[float | None] = mapped_column(Float, nullable=True)
     is_point: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     origin: Mapped[str] = mapped_column(String(20), nullable=False, default="manual")
+    # «Культура» from object properties (migration 002_object_crop); NULL = not set.
+    crop: Mapped[str | None] = mapped_column(String(120), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False

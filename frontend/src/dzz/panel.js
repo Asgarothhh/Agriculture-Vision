@@ -1,8 +1,10 @@
 import * as dzzApi from "../api/dzz.js";
+import { logAction } from "../api/activity.js";
 import { $, showToast } from "../ui.js";
 import { getMap, setBasemap, setDzzCoverageBounds, setDzzTileGrid } from "../map/map.js";
 import { restoreDzzSession } from "./session.js";
 import { clearDzzTileCache } from "./tiles.js";
+import { getDzzSitesCount, setDzzSites } from "./dock.js";
 import {
   DZZ_DEFAULT_SERVICE,
   dzzSession,
@@ -101,13 +103,13 @@ export async function disconnectDzz() {
     clearDzzTileCache();
     if ($("opt-dzz-login")) $("opt-dzz-login").value = "";
     if ($("opt-dzz-password")) $("opt-dzz-password").value = "";
-    if ($("dzz-sites-list")) $("dzz-sites-list").innerHTML = "";
-    if ($("dzz-sites-settings-list")) $("dzz-sites-settings-list").innerHTML = "";
+    setDzzSites([]);
     setDzzCoverageBounds(null);
     setDzzTileGrid(false);
     if ($("opt-dzz-tile-grid")) $("opt-dzz-tile-grid").checked = false;
     if ($("opt-basemap")) $("opt-basemap").value = "satellite";
-    showToast("dzz.by отключён");
+    showToast("Вышли из dzz.by. Открыта обычная карта");
+    logAction("tool", "Выход из dzz.by, возврат к обычной карте");
     await refreshDzzStatus(true);
     setBasemap("satellite");
   } catch (err) {
@@ -135,7 +137,6 @@ export async function refreshDzzStatus(force = false) {
       }
       if (connected) setDzzPill("status-online", "dzz.by · Онлайн");
       else setDzzPill("status-idle", "dzz.by · Не подключено");
-      if ($("dzz-sites-bar")) $("dzz-sites-bar").hidden = !connected;
       return status;
     } catch {
       setDzzPill("status-offline", "dzz.by · Ошибка");
@@ -166,23 +167,12 @@ export function stopDzzPolling() {
   clearTimeout(pollTimer);
 }
 
-function renderSiteButtons(sites) {
-  const html = (sites || [])
-    .map(
-      (site) =>
-        `<button type="button" class="dzz-site-chip" data-lat="${site.center[0]}" data-lon="${site.center[1]}">${site.name}</button>`,
-    )
-    .join("");
-  const list = $("dzz-sites-list");
-  const settings = $("dzz-sites-settings-list");
-  if (list) list.innerHTML = html;
-  if (settings) settings.innerHTML = html;
-  $("dzz-sites-settings")?.removeAttribute("hidden");
-  document.querySelectorAll(".dzz-site-chip").forEach((btn) => {
-    btn.onclick = () => {
-      getMap()?.setView([Number(btn.dataset.lat), Number(btn.dataset.lon)], 14);
-    };
-  });
+function setConnStatus(text) {
+  if ($("dzz-conn-status")) $("dzz-conn-status").textContent = text || "";
+}
+
+function reportSites(count) {
+  setConnStatus(count ? `Подключено: ${count} участок(ов) ортофото` : "Подключение есть, но каталог участков пуст");
 }
 
 export async function loadDzzSites() {
@@ -193,7 +183,8 @@ export async function loadDzzSites() {
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const payload = await res.json();
     const sites = parseDzzSites(payload);
-    renderSiteButtons(sites);
+    setDzzSites(sites);
+    reportSites(sites.length);
     const union = unionSiteBounds(sites);
     dzzSession.bounds = union;
     if (union) {
@@ -205,9 +196,12 @@ export async function loadDzzSites() {
   } catch {
     try {
       const sites = await dzzApi.dzzSites();
-      if (Array.isArray(sites) && sites.length) renderSiteButtons(sites);
+      const list = Array.isArray(sites) ? sites : [];
+      setDzzSites(list);
+      reportSites(list.length);
     } catch {
-      /* ignore */
+      setDzzSites([]);
+      setConnStatus("Не удалось загрузить участки dzz.by");
     }
   }
 }
@@ -366,8 +360,11 @@ export function onBasemapSelectChange(value) {
   $("basemap-custom-block").style.display = value === "custom" ? "block" : "none";
   if (value === "dzz") {
     refreshDzzStatus().then((status) => {
-      if (status?.connected) setBasemap("dzz");
-      else testDzzAccess();
+      if (status?.connected) {
+        setBasemap("dzz");
+        // The catalogue may have failed at connect time; retry now that dzz.by is shown.
+        if (!getDzzSitesCount()) loadDzzSites();
+      } else testDzzAccess();
     });
     return;
   }

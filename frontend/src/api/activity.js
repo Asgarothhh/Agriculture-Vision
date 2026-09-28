@@ -17,3 +17,26 @@ export function openActivityResult(taskId) {
 export function downloadActivityResult(taskId) {
   return api(`/api/v1/activity/${taskId}/result`);
 }
+
+// Reference history types → server categories.
+const EVENT_CATEGORY = {
+  tool: "map_tools",
+  map: "map_tools",
+  account: "account",
+  login: "account",
+  export: "export",
+  process: "upload_processing",
+  upload: "upload_processing",
+};
+
+/**
+ * Records a UI event the server cannot see by itself (tool switch, undo, basemap…),
+ * like logAction() of the reference. Fire-and-forget: history must never break the UI.
+ */
+export function logAction(type, action, payload) {
+  const category = EVENT_CATEGORY[type] || "map_tools";
+  return api("/api/v1/activity/", {
+    method: "POST",
+    body: JSON.stringify({ category, action: String(action).slice(0, 300), payload: payload || null }),
+  }).catch(() => {});
+}
