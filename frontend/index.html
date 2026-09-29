@@ -451,7 +451,7 @@
 
                 <div id="basemap-custom-block" class="basemap-extra-block" style="display:none;">
                     <div class="settings-section-title">Дополнительная подложка</div>
-                    <p class="panel-hint">XYZ: OSM — {z}/{x}/{y}, ArcGIS — {z}/{y}/{x}. Можно вставить WMTSCapabilities.xml — клиент разберёт слои. Матрица EPSG:4326 / GoogleCRS84Quad переключает карту в градусы; спутник, схема и dzz.by остаются в Web Mercator.</p>
+                    <p class="panel-hint">XYZ: OSM — {z}/{x}/{y}, ArcGIS — {z}/{y}/{x}. Можно вставить WMTSCapabilities.xml — клиент разберёт слои. Карта работает в Web Mercator: наборы в градусах (EPSG:4326 / GoogleCRS84Quad) не применяются — выберите набор Web Mercator (GoogleMapsCompatible).</p>
                     <div class="settings-block-title">Название</div>
                     <input type="text" id="opt-custom-basemap-name" class="search-input" placeholder="Моя подложка">
                     <div class="settings-block-title">URL шаблон тайлов или WMTSCapabilities.xml</div>

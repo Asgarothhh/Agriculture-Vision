@@ -1,4 +1,4 @@
-import { dzzEnsureTileBlob, dzzFetchResilient, dzzPrefetch } from "../dzz/tiles.js";
+import { DZZ_EMPTY_TILE_BYTES, dzzEnsureTileBlob, dzzFetchResilient, dzzPrefetch } from "../dzz/tiles.js";
 import {
   DZZ_DEFAULT_SERVICE,
   dzzSession,
@@ -7,6 +7,7 @@ import {
   toSameOriginDzzUrl,
 } from "../dzz/urls.js";
 import { isSecurityError, withTimeout } from "../ui.js";
+import { resolveTileTemplate } from "./tileTemplate.js";
 
 const DEFAULT_CENTER = [53.9, 27.55];
 const DEFAULT_ZOOM = 13;
@@ -62,8 +63,14 @@ function DzzTileLayer() {
       const url = toSameOriginDzzUrl(getActiveBasemapTileUrl(coords.z, coords.x, coords.y));
       dzzEnsureTileBlob(url)
         .then((blob) => {
-          if (blob.size < 400) throw new Error(`empty tile ${blob.size}`);
+          // No orthophoto here: the satellite underneath stays visible (reference behaviour).
+          if (blob.size < DZZ_EMPTY_TILE_BYTES) throw new Error(`empty tile ${blob.size}`);
+          const objectUrl = URL.createObjectURL(blob);
+          // The decoded image stays in the <img>; the blob: URL must be released or
+          // memory grows with every zoom and pan.
+          const release = () => URL.revokeObjectURL(objectUrl);
           tile.onload = () => {
+            release();
             if (tile.naturalWidth <= 1 && tile.naturalHeight <= 1) {
               done(new Error("placeholder tile"), tile);
               return;
@@ -71,8 +78,11 @@ function DzzTileLayer() {
             done(null, tile);
             dzzPrefetch(coords);
           };
-          tile.onerror = (err) => done(err, tile);
-          tile.src = URL.createObjectURL(blob);
+          tile.onerror = (err) => {
+            release();
+            done(err, tile);
+          };
+          tile.src = objectUrl;
         })
         .catch((err) => done(err, tile));
       return tile;
@@ -91,6 +101,7 @@ export function initMap() {
     ...TILE_OPTS,
     attribution: "Esri",
     crossOrigin: "anonymous",
+    zIndex: 1,
   });
   // The entry nginx (e.g. behind the remote-access IP) may lack /basemap/esri/.
   // Esri serves tiles with CORS, so the direct URL keeps the canvas clean too.
@@ -105,11 +116,17 @@ export function initMap() {
     crossOrigin: "anonymous",
   });
   const DzzLayer = DzzTileLayer();
+  // Zoom range as in the reference: ArcGIS cache levels start at z8 (z-8 = 0), native to z22.
   tileDzz = new DzzLayer("", {
     maxZoom: 22,
+    minZoom: 3,
+    minNativeZoom: 8,
+    maxNativeZoom: 22,
     attribution: "dzz.by",
     keepBuffer: 4,
     updateWhenZooming: true,
+    updateWhenIdle: true,
+    zIndex: 2,
   });
   [tileSatellite, tileScheme, tileDzz].forEach(bindTileLoadIndicator);
   tileSatellite.addTo(map);
@@ -167,11 +184,22 @@ export function setBasemap(kind, customUrl) {
     tileScheme.addTo(map);
     basemapKind = "scheme";
   } else if (kind === "dzz") {
+    // Satellite stays underneath: where dzz.by has no orthophoto the map is not empty.
+    tileSatellite.addTo(map);
     tileDzz.redraw();
     tileDzz.addTo(map);
     basemapKind = "dzz";
-  } else if (kind === "custom" && customUrl) {
-    tileCustom = L.tileLayer(customUrl, { ...TILE_OPTS, attribution: "custom", crossOrigin: "anonymous" });
+  } else if (kind === "custom" && resolveTileTemplate(customUrl)) {
+    // WMTS / ArcGIS placeholders and cache levels resolved as in the reference.
+    const resolved = resolveTileTemplate(customUrl);
+    tileCustom = L.tileLayer(resolved.url, {
+      ...TILE_OPTS,
+      zoomOffset: resolved.zoomOffset,
+      minNativeZoom: resolved.minNativeZoom,
+      maxNativeZoom: resolved.maxNativeZoom,
+      attribution: "custom",
+      crossOrigin: "anonymous",
+    });
     bindTileLoadIndicator(tileCustom);
     tileCustom.addTo(map);
     basemapKind = "custom";
@@ -470,7 +498,8 @@ function captureTileUrls(z, x, y) {
   if (basemapKind === "custom" && tileCustom?._url) {
     const subs = tileCustom.options.subdomains || "abc";
     const s = subs[Math.abs(x + y) % subs.length];
-    return [L.Util.template(tileCustom._url, { ...tileCustom.options, s, x, y, z, r: "" })];
+    const zz = z + (tileCustom.options.zoomOffset || 0);
+    return [L.Util.template(tileCustom._url, { ...tileCustom.options, s, x, y, z: zz, r: "" })];
   }
   return [L.Util.template(ESRI_PROXY_TEMPLATE, { x, y, z }), L.Util.template(ESRI_DIRECT_TEMPLATE, { x, y, z })];
 }
@@ -694,6 +723,11 @@ export function enableAoiDraw(onDone) {
     setAoiBounds(e.layer.getBounds());
     onDone?.(e.layer.getBounds());
   });
+}
+
+/** Re-requests dzz.by tiles (after the connection came back or the account changed). */
+export function redrawDzzLayer() {
+  if (map && tileDzz && map.hasLayer(tileDzz)) tileDzz.redraw();
 }
 
 export function setDzzCoverageBounds(bounds) {

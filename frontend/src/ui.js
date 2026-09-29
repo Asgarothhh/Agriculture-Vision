@@ -34,12 +34,13 @@ export function showToast(message, isError = false) {
     el.classList.add("show");
   });
   clearTimeout(showToast._t);
+  const ms = Math.min(8000, Math.max(2500, text.length * 55));
   showToast._t = setTimeout(() => {
     targets.forEach((el) => {
       el.classList.remove("show");
       if (el.id === "global-toast") el.hidden = true;
     });
-  }, 3200);
+  }, ms);
 }
 
 export function showScreen(name) {

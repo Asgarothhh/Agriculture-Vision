@@ -71,3 +71,20 @@ describe("legendItems", () => {
     expect(legendItems(layers, folders, count)).toEqual([{ name: "Слой", color: "#123456" }]);
   });
 });
+
+describe("display settings per email (reference ttz_display_<email>)", () => {
+  it("keeps known fields within the slider ranges and fills gaps with defaults", async () => {
+    const { normalizeDisplay, DISPLAY_DEFAULTS } = await import("./store.js");
+    expect(normalizeDisplay(null)).toEqual({ ...DISPLAY_DEFAULTS });
+    // a legacy set with only the line width must not turn the others into minimums
+    expect(normalizeDisplay({ lineWidth: "4", pointSize: null, fillOpacity: null, coordColor: null, basemap: null })).toEqual({
+      ...DISPLAY_DEFAULTS,
+      lineWidth: 4,
+    });
+    expect(normalizeDisplay({ fillOpacity: 5, pointSize: 99, coordColor: "red", basemap: "google" })).toEqual({
+      ...DISPLAY_DEFAULTS,
+      fillOpacity: 0.9,
+      pointSize: 30,
+    });
+  });
+});

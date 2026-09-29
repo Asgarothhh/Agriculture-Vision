@@ -1,9 +1,15 @@
 import * as dzzApi from "../api/dzz.js";
 import { logAction } from "../api/activity.js";
 import { $, showToast } from "../ui.js";
-import { getMap, setBasemap, setDzzCoverageBounds, setDzzTileGrid } from "../map/map.js";
+import { getBasemapKind, getMap, redrawDzzLayer, setBasemap, setDzzCoverageBounds, setDzzTileGrid } from "../map/map.js";
 import { restoreDzzSession } from "./session.js";
-import { clearDzzTileCache } from "./tiles.js";
+import {
+  isWebMercatorMatrix,
+  pickWebMercatorMatrix,
+  probeTileTemplate,
+  resolveTileTemplate,
+} from "../map/tileTemplate.js";
+import { clearDzzTileCache, dzzFetchResilient } from "./tiles.js";
 import { getDzzSitesCount, setDzzSites } from "./dock.js";
 import {
   DZZ_DEFAULT_SERVICE,
@@ -19,6 +25,9 @@ let inflight = null;
 let lastAt = 0;
 let connecting = false;
 const wmtsCatalogs = { dzz: null, custom: null };
+let recoveryTimer = 0;
+let tilesFailing = false;
+const RECOVERY_CHECK_MS = 10000;
 
 function setDzzPill(kind, text) {
   const el = $("status-dzz");
@@ -53,6 +62,7 @@ export async function testDzzAccess() {
   try {
     const result = await dzzApi.connectDzz({ login, password, url });
     if ($("opt-dzz-password")) $("opt-dzz-password").value = "";
+    clearDzzTileCache();
     dzzSession.connected = true;
     dzzSession.serviceRoot = result.service_url || result.url || normalizeServiceRoot(url);
     dzzSession.url = dzzSession.serviceRoot;
@@ -62,6 +72,7 @@ export async function testDzzAccess() {
     if ($("dzz-conn-status")) $("dzz-conn-status").textContent = "Подключено";
     showToast("dzz.by подключён");
     setBasemap("dzz");
+    redrawDzzLayer();
     await refreshDzzStatus(true);
     loadWmtsCatalog("dzz", { silent: true });
     loadDzzSites();
@@ -97,6 +108,8 @@ export function onDzzPillClick() {
 export async function disconnectDzz() {
   try {
     await dzzApi.disconnectDzz();
+    stopRecoveryChecks();
+    tilesFailing = false;
     dzzSession.connected = false;
     dzzSession.wmtsTemplate = "";
     dzzSession.bounds = null;
@@ -135,6 +148,7 @@ export async function refreshDzzStatus(force = false) {
       if (connected && (status.service_url || status.url)) {
         dzzSession.serviceRoot = status.service_url || status.url;
       }
+      fillSavedConnection(status);
       if (connected) setDzzPill("status-online", "dzz.by · Онлайн");
       else setDzzPill("status-idle", "dzz.by · Не подключено");
       return status;
@@ -175,11 +189,97 @@ function reportSites(count) {
   setConnStatus(count ? `Подключено: ${count} участок(ов) ортофото` : "Подключение есть, но каталог участков пуст");
 }
 
+/** URL of the active dzz.by connection in the settings form (after a page reload). */
+function fillSavedConnection(status) {
+  if (!status?.connected) return;
+  const urlEl = $("opt-dzz-url");
+  const url = status.service_url || status.url;
+  if (urlEl && url && document.activeElement !== urlEl) urlEl.value = url;
+}
+
+function stopRecoveryChecks() {
+  clearTimeout(recoveryTimer);
+  recoveryTimer = 0;
+}
+
+/**
+ * Tiles stopped loading: check dzz.by in the background (the header status is left as is)
+ * and, once it answers again, re-request the failed tiles and the site list.
+ */
+function scheduleRecoveryCheck() {
+  if (recoveryTimer) return;
+  recoveryTimer = setTimeout(async () => {
+    recoveryTimer = 0;
+    if (!tilesFailing || !dzzSession.connected) return;
+    let health = null;
+    try {
+      health = await dzzApi.dzzCheck();
+    } catch {
+      health = null;
+    }
+    if (health?.connected) onDzzRecovered();
+    else {
+      if (health && health.status === "bad_credentials") {
+        setConnStatus("Учётные данные dzz.by больше не подходят — подключитесь заново");
+      } else if (health && !health.connected && health.status !== "bad_credentials") {
+        setConnStatus("Сервис dzz.by недоступен. Повторная проверка каждые 10 с.");
+      }
+      scheduleRecoveryCheck();
+    }
+  }, RECOVERY_CHECK_MS);
+}
+
+function onDzzRecovered() {
+  tilesFailing = false;
+  stopRecoveryChecks();
+  if (getBasemapKind() !== "dzz") return;
+  redrawDzzLayer();
+  if (!getDzzSitesCount()) loadDzzSites();
+  setConnStatus("Связь с dzz.by восстановлена");
+  showToast("Связь с dzz.by восстановлена");
+}
+
+/** App logout: the next user of this browser must not see this user's dzz.by tiles. */
+export function resetDzzClient() {
+  stopRecoveryChecks();
+  tilesFailing = false;
+  dzzSession.connected = false;
+  dzzSession.wmtsTemplate = "";
+  dzzSession.bounds = null;
+  clearDzzTileCache();
+  setDzzSites([]);
+  if ($("opt-dzz-login")) $("opt-dzz-login").value = "";
+  if ($("opt-dzz-password")) $("opt-dzz-password").value = "";
+  setConnStatus("");
+}
+
+let recoveryBound = false;
+
+export function initDzzRecovery() {
+  if (recoveryBound) return;
+  recoveryBound = true;
+  document.addEventListener("av:dzz-tiles-failing", (event) => {
+    if (tilesFailing) return;
+    tilesFailing = true;
+    if (event.detail?.reason === "session") {
+      dzzSession.connected = false;
+      setConnStatus("Подключение к dzz.by отключено — подключитесь заново");
+      showToast("Подключение к dzz.by отключено — подключитесь заново в настройках", true);
+      return;
+    }
+    setConnStatus("Тайлы dzz.by не загружаются — проверяем связь…");
+    scheduleRecoveryCheck();
+  });
+  document.addEventListener("av:dzz-tiles-ok", () => {
+    if (tilesFailing) onDzzRecovered();
+  });
+}
+
 export async function loadDzzSites() {
   const root = dzzSession.serviceRoot || DZZ_DEFAULT_SERVICE;
   const queryUrl = `${root}/query?where=1%3D1&outFields=Name&returnGeometry=true&outSR=4326&f=json`;
   try {
-    const res = await fetch(toSameOriginDzzUrl(queryUrl), { credentials: "same-origin" });
+    const res = await dzzFetchResilient(toSameOriginDzzUrl(queryUrl), 20000);
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const payload = await res.json();
     const sites = parseDzzSites(payload);
@@ -225,16 +325,21 @@ function renderWmtsMatrixAndStyle(source) {
   const matrixIds = layer?.tileMatrixSets || (catalog.tileMatrixSets || []).map((item) => item.id);
   const byId = Object.fromEntries((catalog.tileMatrixSets || []).map((item) => [item.id, item]));
   if (matrixSelect) {
+    const previous = matrixSelect.value;
     matrixSelect.innerHTML = matrixIds
       .map((id) => {
         const item = byId[id] || { id, supported: true };
-        const mark = item.supported === false ? " (не поддерживается)" : "";
+        const mark = isWebMercatorMatrix(item) ? "" : " (градусы — не поддерживается)";
         const reach = item.reachable === false ? ` (ответ ${item.status || "ошибка"})` : "";
         return `<option value="${id}">${id}${mark}${reach}</option>`;
       })
       .join("");
     const suggested = catalog.suggested?.matrix;
-    if (suggested && matrixIds.includes(suggested)) matrixSelect.value = suggested;
+    const usable = pickWebMercatorMatrix(matrixIds, byId);
+    if (previous && matrixIds.includes(previous)) matrixSelect.value = previous;
+    else if (suggested && matrixIds.includes(suggested) && isWebMercatorMatrix(byId[suggested] || { id: suggested })) {
+      matrixSelect.value = suggested;
+    } else if (usable) matrixSelect.value = usable.id;
   }
   if (styleSelect) {
     const styles = layer?.styles || ["default"];
@@ -242,12 +347,14 @@ function renderWmtsMatrixAndStyle(source) {
     const suggestedStyle = catalog.suggested?.style || layer?.defaultStyle;
     if (suggestedStyle) styleSelect.value = suggestedStyle;
   }
-  const matrix = byId[matrixSelect?.value] || {};
+  const matrix = byId[matrixSelect?.value] || { id: matrixSelect?.value };
   if (hint) {
-    if (source === "dzz" && matrix.wellKnown === "GoogleMapsCompatible" && matrix.reachable === false) {
+    if (!pickWebMercatorMatrix(matrixIds, byId)) {
+      hint.textContent = "У этого слоя нет набора в Web Mercator — применить его на карте нельзя.";
+    } else if (!isWebMercatorMatrix(matrix)) {
+      hint.textContent = "Набор в градусах (EPSG:4326) — карта работает в Web Mercator, выберите другой набор.";
+    } else if (source === "dzz" && matrix.wellKnown === "GoogleMapsCompatible" && matrix.reachable === false) {
       hint.textContent = "Матрица GoogleMapsCompatible у dzz.by отвечает 520. Выбран запасной набор.";
-    } else if (matrix.supported === false) {
-      hint.textContent = "Эта матрица в проекции, которую карта не использует.";
     } else {
       hint.textContent = matrix.wellKnown ? `Набор: ${matrix.wellKnown}` : "";
     }
@@ -328,6 +435,11 @@ export function applyWmtsSelection(source = "dzz") {
   const matrixId = field(source, "wmts-matrix")?.value;
   const styleId = field(source, "wmts-style")?.value || "default";
   const layer = (catalog.layers || []).find((item) => item.id === layerId);
+  const chosen = (catalog.tileMatrixSets || []).find((item) => item.id === matrixId) || { id: matrixId };
+  if (!isWebMercatorMatrix(chosen)) {
+    showToast("Набор в градусах (EPSG:4326) не поддерживается — выберите набор Web Mercator", true);
+    return;
+  }
   let template = layer?.resourceUrl || catalog.tileUrlTemplate || catalog.suggested?.tileUrlTemplate || "";
   template = template
     .replaceAll("{Layer}", layerId || "")
@@ -351,24 +463,84 @@ export function applyWmtsSelection(source = "dzz") {
     return;
   }
   if ($("opt-custom-basemap-url")) $("opt-custom-basemap-url").value = template;
-  setBasemap("custom", template);
+  if (!applyCustomBasemap(template)) return;
   showToast("Слой WMTS применён");
+}
+
+/** Why a custom basemap URL cannot be used at all ("" — it can). */
+export function customBasemapProblem(url) {
+  if (!String(url || "").trim()) return "Укажите URL шаблон дополнительной подложки";
+  if (!resolveTileTemplate(url)) {
+    return "В адресе нет {z}/{x}/{y} — вставьте шаблон тайлов или загрузите WMTSCapabilities";
+  }
+  return "";
+}
+
+/** One test tile at the current view: warns, the basemap stays applied (7.11, decision 29.09). */
+export async function warnIfCustomTileFails(url) {
+  const map = getMap();
+  if (!map) return true;
+  const center = map.getCenter();
+  const ok = await probeTileTemplate(resolveTileTemplate(url), center.lat, center.lng, map.getZoom());
+  if (!ok) {
+    showToast(
+      "Тайл по этому адресу не загрузился — проверьте шаблон {z}/{x}/{y}, доступ к сервису и покрытие в этом месте",
+      true,
+    );
+  }
+  return ok;
+}
+
+/** Applies the custom basemap (after the URL checks). Returns false if the URL is unusable. */
+export function applyCustomBasemap(url) {
+  const problem = customBasemapProblem(url);
+  if (problem) {
+    showToast(problem, true);
+    return false;
+  }
+  setBasemap("custom", url);
+  warnIfCustomTileFails(url);
+  return true;
+}
+
+/** Selecting a basemap in settings that cannot be shown: back to the one on the map. */
+function revertBasemapSelect() {
+  const select = $("opt-basemap");
+  if (select) select.value = getBasemapKind();
+  $("basemap-custom-block").style.display = getBasemapKind() === "custom" ? "block" : "none";
 }
 
 export function onBasemapSelectChange(value) {
   $("basemap-dzz-block").style.display = "";
   $("basemap-custom-block").style.display = value === "custom" ? "block" : "none";
   if (value === "dzz") {
-    refreshDzzStatus().then((status) => {
+    refreshDzzStatus().then(async (status) => {
       if (status?.connected) {
         setBasemap("dzz");
         // The catalogue may have failed at connect time; retry now that dzz.by is shown.
         if (!getDzzSitesCount()) loadDzzSites();
-      } else testDzzAccess();
+        return;
+      }
+      const login = $("opt-dzz-login")?.value.trim();
+      const password = $("opt-dzz-password")?.value;
+      if (!login || !password) {
+        showToast("Укажите логин, пароль и адрес, затем «Проверить подключение»", true);
+        revertBasemapSelect();
+        return;
+      }
+      await testDzzAccess();
+      if (!dzzSession.connected) revertBasemapSelect();
     });
     return;
   }
-  if (value !== "custom") setBasemap(value);
+  if (value === "custom") {
+    // The block with the URL stays open; an empty URL only gets a hint.
+    const url = $("opt-custom-basemap-url")?.value.trim();
+    if (!url) showToast("Укажите URL шаблон дополнительной подложки", true);
+    else applyCustomBasemap(url);
+    return;
+  }
+  setBasemap(value);
 }
 
 export function goToDzzTileFromForm(source) {

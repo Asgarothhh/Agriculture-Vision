@@ -187,20 +187,23 @@ export async function loadMapData() {
   notifyRecords();
 }
 
-/** Base style of a layer's objects; point objects get a denser fill (+20 %, as in the reference). */
+/**
+ * Base style of a layer's objects from the *saved* display settings (the sliders only
+ * preview numbers until «Сохранить настройки»); point objects get +20 % fill (reference).
+ */
 export function styleFor(layer) {
-  const fillOpacity = Number(localStorage.getItem("ttz_fill_opacity") || $("opt-fill-opacity")?.value || 35) / 100;
+  const fillOpacity = display.fillOpacity;
   return {
     color: layer.color || "#43A047",
-    weight: Number(localStorage.getItem("ttz_line_width") || $("opt-line-width")?.value || 2),
+    weight: display.lineWidth,
     fillOpacity,
     pointFillOpacity: Math.min(0.9, fillOpacity + 0.2),
-    pointSize: Number(localStorage.getItem("ttz_point_size") || $("opt-point-size")?.value || 5),
+    pointSize: display.pointSize,
   };
 }
 
 export function coordColor() {
-  return $("opt-coord-color")?.value || "#ff3366";
+  return display.coordColor;
 }
 
 function buildRecord(layer, obj) {
@@ -582,44 +585,168 @@ export async function importLayerFile(file) {
 
 /* ---------------------------------------------------------------- display settings (stage 5) */
 
-export function applyDisplaySettings() {
-  applyLiveStyles();
+// As in the reference: saved per email under ttz_display_<email> (same format: fillOpacity
+// is a fraction), a custom basemap under ttz_basemap_extra_<email>. Applied to the map only
+// by «Сохранить настройки»; another account gets its own values or the defaults.
+export const DISPLAY_DEFAULTS = Object.freeze({
+  pointSize: 5,
+  lineWidth: 2,
+  fillOpacity: 0.35,
+  coordColor: "#ff3366",
+  basemap: "satellite",
+});
+const LEGACY_DISPLAY_KEYS = ["ttz_point_size", "ttz_line_width", "ttz_fill_opacity", "ttz_coord_color", "ttz_basemap"];
+
+let display = { ...DISPLAY_DEFAULTS };
+
+function displayKey(email) {
+  return `ttz_display_${email || "anon"}`;
 }
 
-export function applyLiveStyles() {
-  localStorage.setItem("ttz_point_size", $("opt-point-size")?.value || "5");
-  localStorage.setItem("ttz_line_width", $("opt-line-width")?.value || "2");
-  localStorage.setItem("ttz_fill_opacity", $("opt-fill-opacity")?.value || "35");
-  localStorage.setItem("ttz_coord_color", $("opt-coord-color")?.value || "#ff3366");
+function basemapExtraKey(email) {
+  return `ttz_basemap_extra_${email || "anon"}`;
+}
+
+function readJson(key) {
+  try {
+    return JSON.parse(localStorage.getItem(key) || "null");
+  } catch {
+    return null;
+  }
+}
+
+function writeJson(key, value) {
+  try {
+    localStorage.setItem(key, JSON.stringify(value));
+  } catch {
+    /* storage unavailable: the values live until reload */
+  }
+}
+
+/** Keeps only known fields within the slider ranges. */
+export function normalizeDisplay(raw) {
+  const src = raw && typeof raw === "object" ? raw : {};
+  const num = (value, min, max, fallback) => {
+    // Number(null) and Number("") are 0 — a missing value must give the default, not the minimum.
+    if (value === null || value === undefined || value === "") return fallback;
+    const n = Number(value);
+    return Number.isFinite(n) ? Math.min(max, Math.max(min, n)) : fallback;
+  };
+  return {
+    pointSize: num(src.pointSize, 1, 30, DISPLAY_DEFAULTS.pointSize),
+    lineWidth: num(src.lineWidth, 1, 20, DISPLAY_DEFAULTS.lineWidth),
+    fillOpacity: num(src.fillOpacity, 0.05, 0.9, DISPLAY_DEFAULTS.fillOpacity),
+    coordColor: /^#[0-9a-f]{6}$/i.test(String(src.coordColor || "")) ? src.coordColor : DISPLAY_DEFAULTS.coordColor,
+    basemap: ["satellite", "scheme", "dzz", "custom"].includes(src.basemap) ? src.basemap : DISPLAY_DEFAULTS.basemap,
+  };
+}
+
+/** Settings stored before they were per email (one browser-wide set): taken over once. */
+function takeLegacyDisplay() {
+  let found = false;
+  const get = (key) => {
+    try {
+      const value = localStorage.getItem(key);
+      if (value !== null) found = true;
+      return value;
+    } catch {
+      return null;
+    }
+  };
+  const legacy = {
+    pointSize: get("ttz_point_size"),
+    lineWidth: get("ttz_line_width"),
+    fillOpacity: get("ttz_fill_opacity") !== null ? Number(get("ttz_fill_opacity")) / 100 : null,
+    coordColor: get("ttz_coord_color"),
+    basemap: get("ttz_basemap"),
+  };
+  LEGACY_DISPLAY_KEYS.forEach((key) => {
+    try {
+      localStorage.removeItem(key);
+    } catch {
+      /* ignore */
+    }
+  });
+  return found ? normalizeDisplay(legacy) : null;
+}
+
+export function getDisplaySettings() {
+  return { ...display };
+}
+
+export function getBasemapExtra(email) {
+  const saved = readJson(basemapExtraKey(email)) || {};
+  return { customName: String(saved.customName || ""), customUrl: String(saved.customUrl || "") };
+}
+
+/** Puts the saved values into the settings form (sliders, numbers, colour, basemap, custom URL). */
+export function fillDisplayForm(values = display, extra = null) {
+  const set = (id, value) => {
+    if ($(id)) $(id).value = value;
+  };
+  const text = (id, value) => {
+    if ($(id)) $(id).innerText = value;
+  };
+  const fillPct = Math.round(values.fillOpacity * 100);
+  set("opt-point-size", values.pointSize);
+  text("point-size-value", values.pointSize);
+  set("opt-line-width", values.lineWidth);
+  text("line-width-value", values.lineWidth);
+  set("opt-fill-opacity", fillPct);
+  text("fill-opacity-value", fillPct);
+  set("opt-coord-color", values.coordColor);
+  set("opt-basemap", values.basemap);
+  if (extra) {
+    set("opt-custom-basemap-name", extra.customName);
+    set("opt-custom-basemap-url", extra.customUrl);
+  }
+}
+
+/** Values currently in the settings form (not applied yet). */
+export function readDisplayForm() {
+  return normalizeDisplay({
+    pointSize: $("opt-point-size")?.value,
+    lineWidth: $("opt-line-width")?.value,
+    fillOpacity: Number($("opt-fill-opacity")?.value) / 100,
+    coordColor: $("opt-coord-color")?.value,
+    basemap: $("opt-basemap")?.value,
+  });
+}
+
+/** At login / session restore: this account's saved settings (or the defaults). */
+export function loadDisplaySettings(email) {
+  const saved = readJson(displayKey(email));
+  if (saved) display = normalizeDisplay(saved);
+  else {
+    const legacy = takeLegacyDisplay();
+    display = legacy || { ...DISPLAY_DEFAULTS };
+    if (legacy) writeJson(displayKey(email), display);
+  }
+  const extra = getBasemapExtra(email);
+  fillDisplayForm(display, extra);
+  return { display: { ...display }, extra };
+}
+
+/** «Сохранить настройки»: remember for this email and apply to the map. */
+export function saveDisplaySettings(email, values, extra = null) {
+  display = normalizeDisplay(values);
+  writeJson(displayKey(email), display);
+  if (extra) writeJson(basemapExtraKey(email), { customName: extra.customName || "", customUrl: extra.customUrl || "" });
+  applyDisplaySettings();
+  return { ...display };
+}
+
+/** Repaints all objects, captions and selection with the saved settings. */
+export function applyDisplaySettings() {
   layers.forEach((layer) => restyleLayer(layer.id));
   renderFieldLabels();
   notifyRecords();
 }
 
-export function restoreDisplaySettings() {
-  const line = localStorage.getItem("ttz_line_width");
-  const fill = localStorage.getItem("ttz_fill_opacity");
-  const point = localStorage.getItem("ttz_point_size");
-  const coord = localStorage.getItem("ttz_coord_color");
-  if (line && $("opt-line-width")) {
-    $("opt-line-width").value = line;
-    if ($("line-width-value")) $("line-width-value").innerText = line;
-  }
-  if (fill && $("opt-fill-opacity")) {
-    $("opt-fill-opacity").value = fill;
-    if ($("fill-opacity-value")) $("fill-opacity-value").innerText = fill;
-  }
-  if (point && $("opt-point-size")) {
-    $("opt-point-size").value = point;
-    if ($("point-size-value")) $("point-size-value").innerText = point;
-  }
-  if (coord && $("opt-coord-color")) $("opt-coord-color").value = coord;
-}
-
+/** Login / logout: nothing of the previous account stays in memory or in the form. */
 export function resetDisplaySettings() {
-  ["ttz_point_size", "ttz_line_width", "ttz_fill_opacity", "ttz_coord_color", "ttz_basemap"].forEach((k) =>
-    localStorage.removeItem(k),
-  );
+  display = { ...DISPLAY_DEFAULTS };
+  fillDisplayForm(display, { customName: "", customUrl: "" });
 }
 
 export { geodesicAreaM2, formatArea, getFeatureGroup };

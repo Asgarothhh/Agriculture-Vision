@@ -113,7 +113,8 @@ export async function deleteAccount() {
   if (!warn) return;
   openAppModal({
     title: "Подтвердите паролем",
-    bodyHtml: `<div class="input-group"><label>ПАРОЛЬ</label><input id="delete-acc-password" type="password" class="search-input" autocomplete="current-password"></div>`,
+    bodyHtml: `<div class="input-group"><label>ПАРОЛЬ</label><input id="delete-acc-password" type="password" class="search-input" autocomplete="current-password"></div>
+      <div id="delete-acc-error" class="form-error"></div>`,
     actions: [
       { label: "Отмена", onClick: closeAppModal },
       {
@@ -129,7 +130,11 @@ export async function deleteAccount() {
             accountDeleteBusy = false;
           } catch (err) {
             accountDeleteBusy = false;
-            showToast(err.message || "Неверный пароль", true);
+            const box = $("delete-acc-error");
+            if (box) {
+              box.textContent = err.message || "Неверный пароль";
+              box.style.display = "block";
+            } else showToast(err.message || "Неверный пароль", true);
           }
         },
       },
@@ -153,9 +158,32 @@ export function hasTaskResult(item) {
 
 let historyRequest = 0;
 
+/** Filter button text, as in the reference: «Все» / «Не выбрано» / category / «Выбрано: N». */
+export function historyFilterLabel(checkedLabels, total) {
+  if (checkedLabels.length === total) return "Все";
+  if (!checkedLabels.length) return "Не выбрано";
+  if (checkedLabels.length === 1) return checkedLabels[0];
+  return `Выбрано: ${checkedLabels.length}`;
+}
+
+function syncHistoryFilterLabel() {
+  const boxes = [...document.querySelectorAll(".history-filter-cat")];
+  const on = boxes.filter((el) => el.checked);
+  const label = $("history-filter-label");
+  if (label) {
+    label.textContent = historyFilterLabel(
+      on.map((el) => el.closest("label")?.textContent.trim() || el.value),
+      boxes.length,
+    );
+  }
+  const all = $("history-filter-all");
+  if (all) all.indeterminate = on.length > 0 && on.length < boxes.length;
+}
+
 export async function renderHistoryFeed() {
   const q = $("history-search")?.value || "";
   const order = $("history-sort")?.value || "newest";
+  syncHistoryFilterLabel();
   const checked = [...document.querySelectorAll(".history-filter-cat:checked")].map((el) => el.value);
   const categories = historyCategories(checked, $("history-filter-all")?.checked);
   const feed = $("history-feed");

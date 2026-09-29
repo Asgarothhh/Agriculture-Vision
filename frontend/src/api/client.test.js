@@ -127,3 +127,45 @@ describe("api refresh", () => {
     expect(fetchMock.mock.calls.some((call) => String(call[0]).includes("/auth/refresh"))).toBe(false);
   });
 });
+
+describe("authFetch (dzz.by tiles with the app token)", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    clearTokens();
+  });
+
+  const json = (status, body) =>
+    new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
+
+  it("sends the token and refreshes it once when it has expired", async () => {
+    const { authFetch } = await import("./client.js");
+    setTokens({ access_token: "old", refresh_token: "r1" });
+    const seen = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url, init) => {
+        seen.push([url, new Headers(init.headers).get("Authorization")]);
+        if (url === "/api/v1/auth/refresh") return json(200, { access_token: "new", refresh_token: "r2" });
+        if (new Headers(init.headers).get("Authorization") === "Bearer old") return json(401, { detail: "Invalid token" });
+        return new Response(new Blob(["tile"]), { status: 200 });
+      }),
+    );
+    const res = await authFetch("/api/v1/dzz/tiles/1/1/1");
+    expect(res.status).toBe(200);
+    expect(seen.map(([u, a]) => `${u} ${a}`)).toEqual([
+      "/api/v1/dzz/tiles/1/1/1 Bearer old",
+      "/api/v1/auth/refresh null",
+      "/api/v1/dzz/tiles/1/1/1 Bearer new",
+    ]);
+  });
+
+  it("leaves dzz.by's own 401 to the caller (no token refresh)", async () => {
+    const { authFetch } = await import("./client.js");
+    setTokens({ access_token: "tok", refresh_token: "r1" });
+    const fetchMock = vi.fn(async () => json(401, { detail: "Нет сессии dzz.by" }));
+    vi.stubGlobal("fetch", fetchMock);
+    const res = await authFetch("/api/v1/dzz/tiles/1/1/1");
+    expect(res.status).toBe(401);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+});

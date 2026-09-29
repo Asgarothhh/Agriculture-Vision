@@ -1,4 +1,5 @@
 import { clearTokens, getAccessToken } from "../api/client.js";
+import { applyAvatarUI } from "../account/avatar.js";
 import * as authApi from "../api/auth.js";
 import {
   $,
@@ -40,6 +41,7 @@ export function applyUser(user) {
   const card = $("card-avatar");
   if (side) side.textContent = av;
   if (card) card.textContent = av;
+  applyAvatarUI(user.email, av);
   if ($("user-display-name")) $("user-display-name").textContent = name || user.email;
   if ($("user-display-role-org")) {
     $("user-display-role-org").textContent = [user.role, user.organization].filter(Boolean).join(" · ");
@@ -70,8 +72,32 @@ export async function restoreSession() {
   }
 }
 
+/** Submit button shows what is going on and cannot be pressed twice (reference 4.1). */
+function busyButton(form, text) {
+  const btn = form?.querySelector?.('button[type="submit"]');
+  if (!btn || btn.disabled) return null;
+  const label = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = text;
+  return () => {
+    btn.disabled = false;
+    btn.textContent = label;
+  };
+}
+
 export async function handleLogin(event) {
   event.preventDefault();
+  const form = event.currentTarget || event.target;
+  if (form?.querySelector?.('button[type="submit"]')?.disabled) return false;
+  const release = busyButton(form, "Проверка...");
+  try {
+    return await doLogin();
+  } finally {
+    release?.();
+  }
+}
+
+async function doLogin() {
   setFormError("login-error", "");
   const email = $("login-email").value.trim();
   const password = $("login-password").value;
@@ -91,6 +117,17 @@ export async function handleLogin(event) {
 
 export async function handleRegister(event) {
   event.preventDefault();
+  const form = event.currentTarget || event.target;
+  if (form?.querySelector?.('button[type="submit"]')?.disabled) return false;
+  const release = busyButton(form, "Создание аккаунта...");
+  try {
+    return await doRegister();
+  } finally {
+    release?.();
+  }
+}
+
+async function doRegister() {
   setFormError("register-error", "");
   const password = $("reg-password").value;
   const passwordRepeat = $("reg-password2").value;

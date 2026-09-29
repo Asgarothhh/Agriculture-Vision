@@ -152,6 +152,30 @@ export function apiWithHeaders(path, options) {
   return rawFetch(path, options, { withHeaders: true });
 }
 
+const APP_TOKEN_ERRORS = new Set(["Not authenticated", "Invalid token", "Invalid token type"]);
+
+/**
+ * fetch() with the app token for binary answers (dzz.by tiles, exportImage): returns the
+ * Response itself. An expired access token is refreshed once; dzz.by's own 401 («нет
+ * сессии», «неверные учётные данные») is returned to the caller unchanged.
+ */
+export async function authFetch(url, init = {}, { retried = false } = {}) {
+  const headers = new Headers(init.headers || {});
+  const token = getAccessToken();
+  if (token) headers.set("Authorization", `Bearer ${token}`);
+  const res = await fetch(url, { credentials: "same-origin", ...init, headers });
+  if (res.status !== 401 || retried) return res;
+  let detail = "";
+  try {
+    detail = (await res.clone().json())?.detail || "";
+  } catch {
+    detail = "";
+  }
+  if (!APP_TOKEN_ERRORS.has(detail)) return res;
+  const refreshed = await refreshAccessToken();
+  return refreshed ? authFetch(url, init, { retried: true }) : res;
+}
+
 export function apiNoAuth(path, options) {
   return rawFetch(path, options, { skipAuth: true, skipRefresh: true });
 }

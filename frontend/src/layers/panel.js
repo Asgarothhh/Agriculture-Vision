@@ -35,6 +35,9 @@ const collapsedFolders = new Set();
 let activeLayerId = null;
 let selectedIds = [];
 let bound = false;
+let layerClickTimer = 0;
+// Wait this long after a click on a layer name: a double click renames the layer instead.
+const LAYER_CLICK_DELAY_MS = 250;
 
 function searchText() {
   return ($("layer-search")?.value || "").toLowerCase();
@@ -168,6 +171,35 @@ function syncSelectionHighlight(ids) {
 }
 
 /* ---------------------------------------------------------------- actions */
+
+/** Opens a layer's object list (also after drawing a new object, as in the reference). */
+export function expandLayer(id) {
+  if (!id || expandedLayers.has(id)) return;
+  expandedLayers.add(id);
+  renderLayersList();
+}
+
+/** Objects of a layer as the row in that place of the list shows them. */
+function rowRecords(layer, folderContextId) {
+  const home = layerHomeFolderId(layer);
+  return recordsOfLayer(layer.id).filter((record) => {
+    const of = objectFolderId(record);
+    return folderContextId ? home === folderContextId || of === folderContextId : !of;
+  });
+}
+
+/**
+ * Click on a layer name: the layer becomes active, its objects list opens and the
+ * properties of one of its objects are shown (the selected one stays selected).
+ */
+function openLayer(layer, folderContextId) {
+  selectLayerAsActive(layer.id);
+  const records = rowRecords(layer, folderContextId);
+  expandLayer(layer.id);
+  if (!records.length) return;
+  const current = records.find((r) => selectedIds.includes(r.obj.id)) || records[0];
+  document.dispatchEvent(new CustomEvent("av:select-object", { detail: { id: current.obj.id, zoom: "auto" } }));
+}
 
 function selectLayerAsActive(id) {
   activeLayerId = id;
@@ -443,7 +475,11 @@ async function onPanelClick(event) {
       if (expandedLayers.has(id)) expandedLayers.delete(id);
       else expandedLayers.add(id);
       renderLayersList();
-    } else if (act === "layer-active" && layer) selectLayerAsActive(id);
+    } else if (act === "layer-active" && layer) {
+      const folderContextId = el.closest(".folder-item")?.dataset.folderId || null;
+      clearTimeout(layerClickTimer);
+      layerClickTimer = setTimeout(() => openLayer(layer, folderContextId), LAYER_CLICK_DELAY_MS);
+    }
     else if (act === "layer-in" && layer) await assignLayerToFolder(layer);
     else if (act === "layer-out" && layer) await removeLayerFromFolder(layer);
     else if (act === "layer-rename" && layer) renameLayer(layer);
@@ -467,6 +503,7 @@ function onPanelDblClick(event) {
   const el = event.target.closest("[data-act]");
   if (!el) return;
   if (el.dataset.act === "layer-active") {
+    clearTimeout(layerClickTimer);
     const layer = getLayer(el.dataset.id);
     if (layer && !isStandardLayer(layer)) renameLayer(layer);
   } else if (el.dataset.act === "folder-name") {

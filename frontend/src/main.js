@@ -1,8 +1,12 @@
 import "./styles/style.css";
+import { handleAvatarFile, onAvatarClick } from "./account/avatar.js";
 import { getAccessToken } from "./api/client.js";
+import { logAction } from "./api/activity.js";
+import { restoreDzzSession } from "./dzz/session.js";
 import {
   handleLogin,
   handleLogout,
+  getCurrentUser,
   handleRegister,
   openForgotPasswordModal,
   restoreSession,
@@ -11,11 +15,11 @@ import {
 } from "./auth/session.js";
 import { bindPasswordToggles, closeAppModal, $, showToast } from "./ui.js";
 import {
-  applyDisplaySettings,
-  applyLiveStyles,
   importLayerFile,
+  loadDisplaySettings,
   loadMapData,
-  restoreDisplaySettings,
+  readDisplayForm,
+  saveDisplaySettings,
   setMapDisplayOption,
   startAoiSelection,
 } from "./layers/store.js";
@@ -44,6 +48,7 @@ import {
   startPolygonMode,
 } from "./map/tools.js";
 import { bindHotkeys, bindSidebarResize } from "./map/hotkeys.js";
+import { initMoreMenu } from "./map/moreMenu.js";
 import { clearUndo, redoLast, undoLast } from "./map/undo.js";
 import {
   handleUploadFile,
@@ -56,16 +61,20 @@ import {
 } from "./tasks/runner.js";
 import {
   applyWmtsSelection,
+  customBasemapProblem,
   disconnectDzz,
   goToDzzTileFromForm,
+  initDzzRecovery,
   loadWmtsCatalog,
   onBasemapSelectChange,
   onDzzPillClick,
   onWmtsLayerChange,
   onWmtsMatrixChange,
+  resetDzzClient,
   startDzzPolling,
   stopDzzPolling,
   testDzzAccess,
+  warnIfCustomTileFails,
 } from "./dzz/panel.js";
 import { exportLayers } from "./export/download.js";
 import { initDzzDock, setDzzDockMode, toggleDzzDock } from "./dzz/dock.js";
@@ -123,7 +132,12 @@ function toggleSegPanel() {
 
 function toggleMoreMenu(event) {
   event?.stopPropagation();
-  $("more-menu")?.classList.toggle("active");
+  const menu = $("more-menu");
+  if (!menu) return;
+  const open = !menu.classList.contains("active");
+  // Every opening starts expanded, not folded as last time (reference).
+  if (open) menu.classList.remove("collapsed");
+  menu.classList.toggle("active", open);
 }
 
 function toggleMoreMenuBody() {
@@ -138,12 +152,14 @@ async function onAppReady() {
   initMap();
   bindHotkeys();
   bindSidebarResize();
-  restoreDisplaySettings();
+  initMoreMenu();
+  const saved = loadDisplaySettings(getCurrentUser()?.email);
   activateMapTool("select", { silent: true });
   initLayersPanel();
   await loadMapData();
   startMlHealthPolling();
   initDzzDock();
+  initDzzRecovery();
   startDzzPolling();
   restoreClassCheckboxes();
   const savedArch = localStorage.getItem("ttz_ml_architecture");
@@ -156,15 +172,27 @@ async function onAppReady() {
     $("seg-threshold").value = savedThr;
     $("seg-threshold-value").innerText = `${savedThr}%`;
   }
-  const savedMap = localStorage.getItem("ttz_basemap");
-  if (savedMap) {
-    if ($("opt-basemap")) $("opt-basemap").value = savedMap;
-    setBasemap(savedMap);
-  }
+  await restoreBasemap(saved);
+}
+
+/**
+ * Basemap saved for this account. dzz.by only when its connection is alive (otherwise the
+ * satellite, no tile errors at login); a custom basemap with its saved URL (7.12).
+ */
+async function restoreBasemap({ display, extra }) {
+  let kind = display.basemap;
+  if (kind === "dzz" && !(await restoreDzzSession())) kind = "satellite";
+  if (kind === "custom" && !extra.customUrl) kind = "satellite";
+  if ($("opt-basemap")) $("opt-basemap").value = kind;
+  if ($("basemap-custom-block")) $("basemap-custom-block").style.display = kind === "custom" ? "block" : "none";
+  // Always set it (also the satellite): the previous account's basemap must not stay on the map.
+  if (kind === "custom") setBasemap("custom", extra.customUrl);
+  else setBasemap(kind);
 }
 
 function onAppLogout() {
   stopDzzPolling();
+  resetDzzClient();
   stopMlHealthPolling();
   resetTools();
   clearUndo();
@@ -203,18 +231,26 @@ function saveClassCheckboxes() {
 setAuthCallbacks({ ready: onAppReady, logout: onAppLogout });
 
 
+/** «Сохранить настройки»: applied to the map and remembered for this email (5.1 / 5.2). */
 function saveSettings() {
-  const value = $("opt-basemap")?.value;
-  localStorage.setItem("ttz_basemap", value || "satellite");
-  if (value === "custom") {
-    const url = $("opt-custom-basemap-url")?.value.trim();
-    if (!url) {
-      showToast("Укажите URL подложки", true);
+  const values = readDisplayForm();
+  const extra = {
+    customName: $("opt-custom-basemap-name")?.value.trim() || "",
+    customUrl: $("opt-custom-basemap-url")?.value.trim() || "",
+  };
+  if (values.basemap === "custom") {
+    const problem = customBasemapProblem(extra.customUrl);
+    if (problem) {
+      showToast(problem, true);
       return;
     }
-    setBasemap("custom", url);
-  } else if (value && value !== "dzz") setBasemap(value);
-  applyDisplaySettings();
+  }
+  saveDisplaySettings(getCurrentUser()?.email, values, extra);
+  if (values.basemap === "custom") {
+    setBasemap("custom", extra.customUrl);
+    warnIfCustomTileFails(extra.customUrl);
+  } else if (values.basemap !== "dzz") setBasemap(values.basemap);
+  logAction("account", "Обновлены настройки");
   showToast("Настройки сохранены");
 }
 
@@ -235,7 +271,6 @@ function shiftDzzTile(dx, dy) {
   if (zEl && !zEl.value) zEl.value = "13";
   goToDzzTileFromForm(source);
 }
-function handleAvatarFile() {}
 
 function bindUi() {
   $("loginForm")?.addEventListener("submit", handleLogin);
@@ -273,17 +308,15 @@ function bindUi() {
   $("import-file-input")?.addEventListener("change", (event) => importLayerFile(event.target.files?.[0]));
   $("upload-file-input")?.addEventListener("change", (event) => handleUploadFile(event.target.files?.[0]));
   $("upload-process-btn")?.addEventListener("click", startUploadProcessing);
+  // The number follows the slider at once; the map changes only on «Сохранить настройки».
   $("opt-point-size")?.addEventListener("input", (event) => {
     $("point-size-value").innerText = event.target.value;
-    applyLiveStyles();
   });
   $("opt-line-width")?.addEventListener("input", (event) => {
     $("line-width-value").innerText = event.target.value;
-    applyLiveStyles();
   });
   $("opt-fill-opacity")?.addEventListener("input", (event) => {
     $("fill-opacity-value").innerText = event.target.value;
-    applyLiveStyles();
   });
   $("opt-basemap")?.addEventListener("change", (event) => onBasemapSelectChange(event.target.value));
   $("dzz-test-btn")?.addEventListener("click", testDzzAccess);
@@ -390,6 +423,12 @@ function bindUi() {
   $("history-search")?.addEventListener("input", renderHistoryFeed);
   $("history-sort")?.addEventListener("change", renderHistoryFeed);
   $("save-profile-btn")?.addEventListener("click", saveProfile);
+  $("card-avatar")?.addEventListener("click", onAvatarClick);
+  if ($("card-avatar")) $("card-avatar").title = "Нажмите: загрузить или удалить аватарку";
+  $("avatar-file-input")?.addEventListener("change", (event) => {
+    handleAvatarFile(event.target.files?.[0]);
+    event.target.value = "";
+  });
   $("delete-account-btn")?.addEventListener("click", deleteAccount);
   document.querySelectorAll(".folder-picker-backdrop").forEach((el) => {
     el.addEventListener("click", () => {

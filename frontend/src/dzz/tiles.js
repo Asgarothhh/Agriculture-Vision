@@ -1,9 +1,21 @@
+import { authFetch } from "../api/client.js";
 import { restoreDzzSession } from "./session.js";
 import { getActiveBasemapTileUrl, toSameOriginDzzUrl } from "./urls.js";
 
 export const DZZ_TILE_CACHE_MAX = 480;
 export const DZZ_MAX_INFLIGHT = 6;
 export const DZZ_PREFETCH_SLOTS = 2;
+// A tile smaller than this is an empty / «no data» answer, not orthophoto (reference value).
+export const DZZ_EMPTY_TILE_BYTES = 2048;
+
+let failing = false;
+
+/** Tells the UI that dzz.by tiles stopped / started loading (network, server, session). */
+function reportTiles(ok, reason) {
+  if (ok === !failing) return;
+  failing = !ok;
+  document.dispatchEvent(new CustomEvent(ok ? "av:dzz-tiles-ok" : "av:dzz-tiles-failing", { detail: { reason } }));
+}
 
 const tileCache = new Map();
 let inflight = 0;
@@ -15,7 +27,7 @@ function sleep(ms) {
 }
 
 function rememberBlob(url, blob) {
-  if (!blob || blob.size < 400) return;
+  if (!blob || blob.size < DZZ_EMPTY_TILE_BYTES) return;
   if (tileCache.has(url)) tileCache.delete(url);
   tileCache.set(url, blob);
   while (tileCache.size > DZZ_TILE_CACHE_MAX) {
@@ -46,7 +58,7 @@ export async function dzzFetchResilient(url, ms = 12000, signal, attempts = 3) {
     const timer = setTimeout(() => ctrl.abort(), ms);
     const merged = signal || ctrl.signal;
     try {
-      const res = await fetch(url, { credentials: "same-origin", signal: merged });
+      const res = await authFetch(url, { signal: merged });
       clearTimeout(timer);
       if (res.status === 401) {
         const restored = await restoreDzzSession();
@@ -54,15 +66,25 @@ export async function dzzFetchResilient(url, ms = 12000, signal, attempts = 3) {
           lastErr = new Error("HTTP 401");
           continue;
         }
+        // No dzz.by connection for this user any more: retrying will not help.
+        reportTiles(false, "session");
+        const err = new Error("Подключение к dzz.by отключено — подключитесь заново в настройках");
+        err.status = 401;
+        throw err;
       }
-      if (res.ok) return res;
+      if (res.ok) {
+        reportTiles(true);
+        return res;
+      }
       lastErr = new Error(`HTTP ${res.status}`);
     } catch (err) {
       clearTimeout(timer);
+      if (err?.status === 401) throw err;
       lastErr = err;
     }
     if (i < attempts - 1) await sleep(delays[i] || 400);
   }
+  reportTiles(false, "network");
   throw lastErr || new Error("dzz tile failed");
 }
 

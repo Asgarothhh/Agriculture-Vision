@@ -49,3 +49,13 @@ describe("hasTaskResult", () => {
     expect(hasTaskResult({ action: "Вход в систему", payload: null })).toBe(false);
   });
 });
+
+describe("history filter label (reference)", () => {
+  it("names the selection", async () => {
+    const { historyFilterLabel } = await import("./profile.js");
+    expect(historyFilterLabel(["Аккаунт", "Экспорт", "Инструменты и карта", "Загрузка и обработка"], 4)).toBe("Все");
+    expect(historyFilterLabel([], 4)).toBe("Не выбрано");
+    expect(historyFilterLabel(["Экспорт"], 4)).toBe("Экспорт");
+    expect(historyFilterLabel(["Экспорт", "Аккаунт"], 4)).toBe("Выбрано: 2");
+  });
+});

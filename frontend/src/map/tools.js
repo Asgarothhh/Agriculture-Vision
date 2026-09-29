@@ -21,7 +21,7 @@ import {
   styleFor,
 } from "../layers/store.js";
 import { createTracked, deleteTracked, mergeTracked, moveTracked, patchTracked } from "../layers/ops.js";
-import { populateCropSelect } from "../layers/panel.js";
+import { expandLayer, populateCropSelect } from "../layers/panel.js";
 import { getFeatureGroup, getMap } from "./map.js";
 import {
   bridgePolygons,
@@ -311,10 +311,12 @@ export function selectObjectById(id, { zoom = false } = {}) {
   if (!record) return;
   selectFeature(id, false);
   showFieldDetail(record);
-  if (zoom) {
-    const bounds = record.leaflet?.getBounds?.();
-    if (bounds?.isValid?.()) map()?.fitBounds(bounds, { maxZoom: 16, padding: [40, 40] });
-  }
+  if (!zoom) return;
+  const bounds = record.leaflet?.getBounds?.();
+  if (!bounds?.isValid?.()) return;
+  // "auto": move the map only when the object is not on screen.
+  if (zoom === "auto" && map()?.getBounds().intersects(bounds)) return;
+  map()?.fitBounds(bounds, { maxZoom: 16, padding: [40, 40] });
 }
 
 /** Kept for older callers: plain selection by ids. */
@@ -610,6 +612,7 @@ function createAreaFromCompassCircle() {
   const geom = circlePolygon(lastCompassCircle.center, lastCompassCircle.radius, 48);
   queue(async () => {
     await createTracked(layerId, geom);
+    expandLayer(layerId);
     showToast("Область создана по кругу циркуля");
   });
 }
@@ -1193,6 +1196,7 @@ async function applyFreehandStroke(path, mode, targetId) {
       return;
     }
     await createTracked(layerId, result.geom);
+    expandLayer(layerId);
     showToast("Контур применён");
     return;
   }
@@ -1418,6 +1422,7 @@ export function finishPolygonDraw({ stay = true } = {}) {
       return;
     }
     await createTracked(layerId, geom);
+    expandLayer(layerId);
     showToast(stay ? "Область создана — кликайте, чтобы начать следующую" : "Область создана");
   });
   if (!stay) setTool("select");

@@ -436,7 +436,7 @@ body {
 .map-top-actions .map-action-btn svg {
     width: 18px; height: 18px;
 }
-.sidebar-panel-wrap.collapsed .sidebar-edge-toggle { right: auto; left: 0; }
+.sidebar-panel-wrap.collapsed .sidebar-edge-toggle { right: auto; left: -25px; }
 .sidebar-panel-wrap.collapsed .sidebar-edge-arrow { transform: rotate(180deg); }
 .sidebar-resizer {
     position: absolute; top: 0; right: -3px; width: 6px; height: 100%;
@@ -1006,19 +1006,19 @@ span.color-box { display: inline-block; border: 1.5px solid #e2e8f0; }
    когда активна) можно свернуть в одну строку, не закрывая его совсем. */
 .more-menu {
     display: none;
-    position: relative;
-    top: auto;
-    right: auto;
+    /* position:fixed; exact top/right come from JS (map/moreMenu.js) by the real position
+       of the tool buttons — the values below are only a fallback before it runs. */
+    position: fixed;
+    top: 12px;
+    right: 12px;
     background: #fff;
     border-radius: 10px;
     box-shadow: 0 6px 16px rgba(0,0,0,0.15);
-    z-index: 20;
-    width: min(280px, calc(100vw - 160px));
-    max-width: min(280px, calc(100vw - 160px));
+    z-index: 1500;
+    width: min(280px, calc(100vw - 24px));
+    max-width: calc(100vw - 24px);
     max-height: min(420px, calc(100vh - 24px));
     overflow: hidden;
-    margin-top: 0;
-    flex-shrink: 0;
 }
 .more-menu.active { display: block; }
 .more-menu.collapsed .map-card-body { grid-template-rows: 0fr; }
@@ -1607,11 +1607,6 @@ span.color-box { display: inline-block; border: 1.5px solid #e2e8f0; }
 .input-group select.search-input { margin-bottom: 0; appearance: auto; }
 #categories-group.collapsed { display: none; }
 .map-text-label {
-    white-space: nowrap;
-    font-weight: 600;
-    color: #1e293b;
-    text-shadow: 0 0 4px #fff;
-    background: transparent;
     border: none;
 }
 .field-label {
